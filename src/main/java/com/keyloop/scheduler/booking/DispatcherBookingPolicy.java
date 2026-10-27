@@ -16,8 +16,13 @@ public final class DispatcherBookingPolicy implements BookingPolicy {
   private static final Duration WALK_IN_GRACE = Duration.ofMinutes(15);
 
   @Override
+  public Instant earliestStart(Instant now) {
+    return now.minus(WALK_IN_GRACE);
+  }
+
+  @Override
   public void checkNew(JobPlan plan, DealershipView d, Instant now) {
-    PolicyChecks.startWindow(plan, d, now.minus(WALK_IN_GRACE), now);
+    PolicyChecks.startWindow(plan, d, earliestStart(now), now);
     OpeningHours hours = PolicyChecks.hoursOrClosed(plan, d);
     TimeRange window = OpeningHoursCalendar.window(d, plan.localDate()).orElseThrow();
     Instant start = plan.period().start();

@@ -12,8 +12,13 @@ import java.time.Instant;
 public final class CustomerBookingPolicy implements BookingPolicy {
 
   @Override
+  public Instant earliestStart(Instant now) {
+    return now.plus(PolicyChecks.CUSTOMER_LEAD);
+  }
+
+  @Override
   public void checkNew(JobPlan plan, DealershipView d, Instant now) {
-    PolicyChecks.startWindow(plan, d, now.plus(PolicyChecks.CUSTOMER_LEAD), now);
+    PolicyChecks.startWindow(plan, d, earliestStart(now), now);
     OpeningHours hours = PolicyChecks.hoursOrClosed(plan, d);
     TimeRange window = OpeningHoursCalendar.window(d, plan.localDate()).orElseThrow();
     TimeRange period = plan.period();

@@ -25,8 +25,7 @@ class ArchitectureTest {
           .resideInAnyPackage("..query..", "..availability..")
           .should()
           .dependOnClassesThat(
-              resideInAPackage("..booking..").and(simpleNameEndingWith("Repository")))
-          .allowEmptyShould(true);
+              resideInAPackage("..booking..").and(simpleNameEndingWith("Repository")));
 
   @ArchTest
   static final ArchRule controllersDoNotUseRepositoriesDirectly =
