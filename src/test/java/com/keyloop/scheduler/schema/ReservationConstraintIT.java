@@ -12,14 +12,21 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.keyloop.scheduler.support.IntegrationTest;
+import com.zaxxer.hikari.HikariDataSource;
+import com.zaxxer.hikari.HikariPoolMXBean;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.TimeZone;
 import java.util.UUID;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataIntegrityViolationException;
 
 class ReservationConstraintIT extends IntegrationTest {
+
+  @Autowired private DataSource dataSource;
 
   private static final Instant DAY = Instant.parse("2030-01-07T00:00:00Z");
 
@@ -188,9 +195,55 @@ class ReservationConstraintIT extends IntegrationTest {
     }
   }
 
+  /**
+   * pgjdbc announces the JVM zone at connect time, so a non-UTC JVM would give non-UTC sessions;
+   * the pool's connection-init-sql must pin them to UTC.
+   */
   @Test
   void databaseRunsInUtc() {
-    assertThat(jdbc.queryForObject("SHOW timezone", String.class)).isEqualTo("UTC");
+    HikariPoolMXBean pool = ((HikariDataSource) dataSource).getHikariPoolMXBean();
+    TimeZone original = TimeZone.getDefault();
+    TimeZone.setDefault(TimeZone.getTimeZone("America/New_York"));
+    try {
+      pool.softEvictConnections();
+
+      assertThat(jdbc.queryForObject("SHOW timezone", String.class)).isEqualTo("UTC");
+    } finally {
+      TimeZone.setDefault(original);
+      pool.softEvictConnections();
+    }
+  }
+
+  @Test
+  void overlappingTechnicianReservationsAreRejected() {
+    insertTechnicianBlock(SAM, at(9, 0), at(9, 45));
+
+    assertThatThrownBy(() -> insertTechnicianBlock(SAM, at(9, 30), at(10, 30)))
+        .isInstanceOf(DataIntegrityViolationException.class)
+        .satisfies(e -> assertThat(sqlState(e)).isEqualTo("23P01"));
+  }
+
+  @Test
+  void bayAndTechnicianWithSamePeriodAreBothAccepted() {
+    insertBayBlock(RIVERSIDE_BAY_1, at(9, 0), at(9, 45), true);
+    insertTechnicianBlock(SAM, at(9, 0), at(9, 45));
+
+    assertThat(jdbc.queryForObject("SELECT count(*) FROM resource_reservation", Integer.class))
+        .isEqualTo(2);
+  }
+
+  private void insertTechnicianBlock(UUID technician, Instant start, Instant end) {
+    jdbc.update(
+        """
+        INSERT INTO resource_reservation
+          (id, dealership_id, technician_id, kind, start_at, end_at)
+        VALUES (?, ?, ?, 'BLOCK', ?, ?)
+        """,
+        UUID.randomUUID(),
+        RIVERSIDE,
+        technician,
+        Timestamp.from(start),
+        Timestamp.from(end));
   }
 
   @Test
