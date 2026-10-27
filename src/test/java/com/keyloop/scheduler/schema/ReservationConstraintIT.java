@@ -19,14 +19,20 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.TimeZone;
 import java.util.UUID;
-import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DataIntegrityViolationException;
 
 class ReservationConstraintIT extends IntegrationTest {
 
-  @Autowired private DataSource dataSource;
+  @Autowired
+  @Qualifier("primaryDataSource")
+  private HikariDataSource primary;
+
+  @Autowired
+  @Qualifier("replicaDataSource")
+  private HikariDataSource replica;
 
   private static final Instant DAY = Instant.parse("2030-01-07T00:00:00Z");
 
@@ -197,20 +203,35 @@ class ReservationConstraintIT extends IntegrationTest {
 
   /**
    * pgjdbc announces the JVM zone at connect time, so a non-UTC JVM would give non-UTC sessions;
-   * the pool's connection-init-sql must pin them to UTC.
+   * each pool's connection-init-sql must pin them to UTC.
    */
   @Test
-  void databaseRunsInUtc() {
-    HikariPoolMXBean pool = ((HikariDataSource) dataSource).getHikariPoolMXBean();
+  void primaryDatabaseRunsInUtc() throws SQLException {
+    assertPoolRunsInUtc(primary);
+  }
+
+  @Test
+  void replicaDatabaseRunsInUtc() throws SQLException {
+    assertPoolRunsInUtc(replica);
+  }
+
+  private void assertPoolRunsInUtc(HikariDataSource pool) throws SQLException {
+    pool.getConnection().close(); // pools start lazily; make sure this one is running
+    HikariPoolMXBean mxBean = pool.getHikariPoolMXBean();
     TimeZone original = TimeZone.getDefault();
     TimeZone.setDefault(TimeZone.getTimeZone("America/New_York"));
     try {
-      pool.softEvictConnections();
+      mxBean.softEvictConnections();
 
-      assertThat(jdbc.queryForObject("SHOW timezone", String.class)).isEqualTo("UTC");
+      try (var connection = pool.getConnection();
+          var statement = connection.createStatement();
+          var rs = statement.executeQuery("SHOW timezone")) {
+        rs.next();
+        assertThat(rs.getString(1)).isEqualTo("UTC");
+      }
     } finally {
       TimeZone.setDefault(original);
-      pool.softEvictConnections();
+      mxBean.softEvictConnections();
     }
   }
 

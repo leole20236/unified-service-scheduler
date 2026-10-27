@@ -4,9 +4,17 @@ spring:
   threads:
     virtual:
       enabled: true
+
+app:
   datasource:
-    hikari:
-      connection-init-sql: SET TIME ZONE 'UTC'
+    primary:
+      url: jdbc:postgresql://localhost:5432/scheduler
+      username: scheduler
+      password: scheduler
+    replica:
+      url: jdbc:postgresql://localhost:5433/scheduler
+      username: scheduler
+      password: scheduler
 
 server:
   shutdown: graceful

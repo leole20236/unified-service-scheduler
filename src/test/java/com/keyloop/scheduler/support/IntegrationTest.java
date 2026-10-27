@@ -45,9 +45,6 @@ public abstract class IntegrationTest {
 
   @DynamicPropertySource
   static void containerProperties(DynamicPropertyRegistry registry) {
-    registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
-    registry.add("spring.datasource.username", POSTGRES::getUsername);
-    registry.add("spring.datasource.password", POSTGRES::getPassword);
     for (String role : List.of("primary", "replica")) {
       registry.add("app.datasource." + role + ".url", POSTGRES::getJdbcUrl);
       registry.add("app.datasource." + role + ".username", POSTGRES::getUsername);
