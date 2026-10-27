@@ -390,10 +390,10 @@ Unit tests: `AvailabilityServiceTest` (unit, mocked `OccupancySource`, `CatalogS
 `BookingConcurrencyIT` (all via `ConcurrencyHarness`, distinct customers and idempotency keys, each test ends with `NoDoubleBookingAssert.verify`):
 - `fiftyRequestsSameStartExactlyOneWins` (`@RepeatedTest(5)`, SOLO: 1 bay, 1 technician) ⇒ exactly one 201, 49 × 409 `SLOT_UNAVAILABLE`, 1 appointment row, 2 active reservations.
 - `overlappingDifferentDurationsOnlyOneWins` (SOLO: 25 threads book Oil Change 45 min at 09:00, 25 threads book Brake Inspection 75 min at 08:30 — the two windows overlap 09:00–09:45) ⇒ exactly one 201 in total.
-- `capacityTwoAdmitsExactlyTwo` (Riverside, BRAKE_INSPECTION needs BRAKES: qualified technicians SAM, ANA, TOM, 3 bays ⇒ capacity 3; 40 threads same start) ⇒ exactly 3 × 201, each on a different technician and a different bay.
+- `capacityThreeAdmitsExactlyThree` (Riverside, BRAKE_INSPECTION needs BRAKES: qualified technicians SAM, ANA, TOM, 3 bays ⇒ capacity 3; 40 threads same start) ⇒ exactly 3 × 201, each on a different technician and a different bay.
 - `technicianSharedAcrossBaysNotDoubleBooked` (Riverside, DIAGNOSTIC needs DIAG: ANA, TOM; 30 threads same start) ⇒ exactly 2 × 201, the two appointments use different technicians even though 3 bays are free.
 - `mixedOverlappingDurationsNeverOverlap` (SOLO, 100 threads, random starts 09:00–12:00 in 15-min steps, mixed 45/75 min) ⇒ any number of 201s, but `NoDoubleBookingAssert.verify` passes and the 201s' periods are pairwise disjoint.
-- `bayBufferRespectedUnderRace` (HUDSON buffer 10 min: 20 threads book 09:00–09:45, 20 threads book 09:50 on the same single remaining bay) ⇒ never both.
+- `bayBufferRespectedUnderRace` (HUDSON buffer 10 min: 20 threads book 09:00–09:45, 20 threads book 09:50, with `HUDSON_BAY_2` blocked for the day so only `HUDSON_BAY_1` is usable) ⇒ never one of each: a 09:00 job and a 09:50 job cannot both hold the bay because 09:45 + 10 min buffer > 09:50.
 `IdempotencyIT`: `retryReturnsSameAppointment` (same key + body twice ⇒ both 201, same `id`, second has `Idempotency-Replayed: true`, 1 row); `sameKeyDifferentBody422`; `parallelDuplicatesCreateOneAppointment` (10 threads same key ⇒ 1 appointment; every response 201 with same id or 409 `REQUEST_IN_PROGRESS` with `Retry-After: 1`).
 
 
