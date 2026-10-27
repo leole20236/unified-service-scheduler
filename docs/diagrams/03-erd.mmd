@@ -1,5 +1,5 @@
 erDiagram
-    DEALERSHIP ||--o{ OPENING_HOURS : "has"
+    DEALERSHIP ||--o{ OPENING_HOURS : "has (local wall-clock)"
     DEALERSHIP ||--o{ SERVICE_BAY : "has"
     DEALERSHIP ||--o{ TECHNICIAN : "employs"
     DEALERSHIP ||--o{ DEALERSHIP_SERVICE : "offers"
@@ -9,9 +9,35 @@ erDiagram
     SKILL ||--o{ TECHNICIAN_SKILL : "held by"
     CUSTOMER ||--o{ VEHICLE : "owns"
     CUSTOMER ||--o{ APPOINTMENT : "books"
-    VEHICLE ||--o{ APPOINTMENT : "serviced in"
+    VEHICLE ||--o{ APPOINTMENT : "FK (vehicle_id, customer_id)"
+    SERVICE_BAY ||--o{ APPOINTMENT : "FK (bay, dealership_id)"
+    TECHNICIAN ||--o{ APPOINTMENT : "FK (tech, dealership_id)"
     APPOINTMENT ||--|{ APPOINTMENT_SERVICE : "includes"
-    SERVICE_TYPE ||--o{ APPOINTMENT_SERVICE : "used in"
+    SERVICE_TYPE ||--o{ APPOINTMENT_SERVICE : "snapshot of"
     APPOINTMENT ||--o{ RESOURCE_RESERVATION : "holds"
-    SERVICE_BAY ||--o{ RESOURCE_RESERVATION : "reserved by"
-    TECHNICIAN ||--o{ RESOURCE_RESERVATION : "reserved by"
+    SERVICE_BAY ||--o{ RESOURCE_RESERVATION : "bay XOR tech"
+    TECHNICIAN ||--o{ RESOURCE_RESERVATION : "bay XOR tech"
+
+    APPOINTMENT {
+        uuid id PK "UUIDv7"
+        uuid dealership_id FK
+        uuid customer_id FK
+        uuid vehicle_id FK
+        uuid service_bay_id FK
+        uuid technician_id FK
+        timestamptz start_at "UTC"
+        timestamptz end_at "UTC"
+        text status
+        bigint version
+    }
+    RESOURCE_RESERVATION {
+        uuid id PK
+        uuid dealership_id
+        uuid service_bay_id FK "XOR"
+        uuid technician_id FK "XOR"
+        uuid resource_id "generated"
+        timestamptz start_at "UTC"
+        timestamptz end_at "UTC"
+        tstzrange period "generated, EXCLUDE"
+        boolean active
+    }
