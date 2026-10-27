@@ -464,7 +464,7 @@ deadlocking; the lock is transaction-scoped (released at commit/rollback, safe w
 transaction pooling). The lock only serialises writers per resource — **the `EXCLUDE`
 constraint remains the sole correctness guarantee**: the code still inserts and still handles
 `23P01`. Result: 0 deadlocks, every race test green. Every writer of `resource_reservation`
-(booking, confirm, reschedule, drag-and-drop, resume, blocks) uses the same lock helper.
+(booking, confirm, reschedule, drag-and-drop, resume, blocks) uses the same lock helper. **Order rule:** take the advisory locks (old and new resources) *before* any `UPDATE` of an existing appointment row, so every writer acquires locks in the same sequence.
 
 ### 8.2 Why not the alternatives
 
@@ -584,7 +584,7 @@ can read and write them atomically:
 1. Validate with the caller's policy (§6.3 rules 1–4). No DB write. To keep a refused hold free of database work, the booking-window check here uses Redis `TIME`, and vehicle ownership is read from the replica (primary only on a miss); the confirm transaction re-checks both against the primary and DB `now()`, so correctness never depends on these early checks.
 2. Ensure the ledger is loaded.
 3. Lua `acquire_hold`: take time from Redis `TIME` (one clock); drop expired `H` members of
-   the touched sets; release the caller's previous hold; walk the ranked technician × bay
+   the touched sets; release the caller's previous hold; ignore the `R` members of the appointment named in `rescheduleOf` (so a booking can move to an overlapping later time); walk the ranked technician × bay
    pairs (§8.3 ranking, catalog from cache) and take the first pair where neither sorted
    set overlaps the requested interval; add `H` members to both sets and create the hold.
 4. Pair found ⇒ `201 { holdId, expiresAt, start, end }`. None ⇒ `409 SLOT_UNAVAILABLE` +
@@ -915,7 +915,7 @@ The OpenAPI 3.1 spec is generated from code (springdoc) and committed as
 | `GET /me/vehicles` | — | `200` `{items:[Vehicle]}` | 401, 403 |
 | `POST /me/vehicles` | `{vin, registration, make, model, modelYear, mileage}` | `201` + `Location: /me/vehicles/{id}` | 400, 401, 403, 409 `VEHICLE_ALREADY_EXISTS` |
 | `GET /me/vehicles/{vehicleId}` | — | `200` Vehicle | 401, 403, 404 |
-| `POST /me/holds` | `{dealershipId, vehicleId, serviceTypeIds, start}` | `201` + `Location: /me/holds/{id}`, body `{id, expiresAt, start, end, dealershipId, serviceTypeIds}` | 400, 401, 403, 404, 409 `SLOT_UNAVAILABLE`, 422 (`OUTSIDE_*`, `SERVICE_NOT_OFFERED`), 503 `HOLDS_UNAVAILABLE` |
+| `POST /me/holds` | `{dealershipId, vehicleId, serviceTypeIds, start, rescheduleOf?}` — `rescheduleOf` (own `BOOKED` appointment id) lets the hold overlap that appointment's current slot; required for holds used by `reschedule` | `201` + `Location: /me/holds/{id}`, body `{id, expiresAt, start, end, dealershipId, serviceTypeIds}` | 400, 401, 403, 404, 409 `SLOT_UNAVAILABLE`, 422 (`OUTSIDE_*`, `SERVICE_NOT_OFFERED`), 503 `HOLDS_UNAVAILABLE` |
 | `GET /me/holds/{holdId}` | — | `200` hold (lets the UI restore its countdown after a reload) | 401, 403, 404 (missing, expired or not yours) |
 | `DELETE /me/holds/{holdId}` | — | `204` — also when already expired or gone (DELETE is idempotent) | 401, 403 |
 | `POST /me/appointments` | `Idempotency-Key`; `{holdId?, dealershipId, vehicleId, serviceTypeIds, start, customerNotes?}` (`customerNotes` ≤ 500 chars) | `201` + `Location: /me/appointments/{id}` + `ETag` | 400, 401, 403, 404, 409 `SLOT_UNAVAILABLE` / `REQUEST_IN_PROGRESS`, 422 (`OUTSIDE_*`, `SERVICE_NOT_OFFERED`, `HOLD_MISMATCH`, `IDEMPOTENCY_KEY_REUSED`), 428 |
