@@ -179,7 +179,7 @@ says what to do next.
 
 ## 10. Out of scope (documented, not built)
 
-Cross-region booking, multi-day jobs, courtesy cars and advisor capacity (the model leaves
+Maintaining dealership reference data (bays, technicians, skills, services — seeded by migrations for now; an admin API or DMS sync later), cross-region booking, multi-day jobs, courtesy cars and advisor capacity (the model leaves
 room for them), pricing, technician clocking, QC / hand-over / invoicing (DMS repair order),
 live push to the board (polling in the demo).
 

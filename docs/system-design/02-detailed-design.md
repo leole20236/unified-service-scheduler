@@ -68,7 +68,7 @@ The challenge says to make reasonable assumptions and document them. These are o
 | A8 | Every dealership, its customers and dispatchers belong to exactly one **region**; each region is a fully independent stack with its own database cluster. Requests are routed by the `region` claim in the JWT. Cross-region use (e.g. a customer booking abroad) is out of scope for this version (§12.4). |
 | A9 | Booking rules differ per actor (§6.4): customers book `now + 2h` … 60 days ahead and may change/cancel until 24h before start; dispatchers can book walk-ins from `now − 15 min`, let jobs run past closing, and change any non-terminal job. |
 | A11 | Walk-in / phone customers may have no login account. `customer.id` is an internal UUID; `idp_subject` links a login account when one exists (linking on later sign-up via verified email is design-only). |
-| A10 | Reference data (dealerships, bays, technicians, skills, service types) is seeded via migrations for the demo; admin CRUD APIs are design-only. |
+| A10 | Reference data (dealerships, opening hours, bays, technicians, skills, service types) lives in the scheduler's own database and is **loaded by Flyway seed migrations**. How it is maintained in production (an admin/helper API, or a sync from the DMS) is **deferred** — no separate dealer service is designed. The scheduler is the system of record for appointments and reservations. |
 
 ## 4. Capacity estimate
 
