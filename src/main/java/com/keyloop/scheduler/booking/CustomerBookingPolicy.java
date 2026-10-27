@@ -39,13 +39,13 @@ public final class CustomerBookingPolicy implements BookingPolicy {
       DealershipView d,
       Instant now) {
     PolicyChecks.requireBooked(status);
-    PolicyChecks.requireLeadTime(d, currentPeriod, now);
+    PolicyChecks.requireLeadTime(currentPeriod, now);
     checkNew(newPlan, d, now);
   }
 
   @Override
   public void checkCancel(AppointmentStatus status, TimeRange currentPeriod, Instant now) {
     PolicyChecks.requireBooked(status);
-    PolicyChecks.requireLeadTime(null, currentPeriod, now);
+    PolicyChecks.requireLeadTime(currentPeriod, now);
   }
 }

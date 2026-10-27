@@ -3,6 +3,7 @@ package com.keyloop.scheduler.booking;
 import com.keyloop.scheduler.catalog.DealershipView;
 import com.keyloop.scheduler.catalog.OpeningHours;
 import com.keyloop.scheduler.common.api.BusinessRuleException;
+import com.keyloop.scheduler.common.api.InvalidTransitionException;
 import com.keyloop.scheduler.common.api.ProblemCodes;
 import com.keyloop.scheduler.common.time.OpeningHoursCalendar;
 import com.keyloop.scheduler.common.time.TimeRange;
@@ -40,7 +41,11 @@ public final class DispatcherBookingPolicy implements BookingPolicy {
       DealershipView d,
       Instant now) {
     PolicyChecks.requireNotTerminal(status);
-    if (status == AppointmentStatus.IN_PROGRESS || status == AppointmentStatus.ON_HOLD) {
+    if (status == AppointmentStatus.ON_HOLD) {
+      throw new InvalidTransitionException(
+          "This job is on hold; resume it before moving or resizing it.");
+    }
+    if (status == AppointmentStatus.IN_PROGRESS) {
       if (!newPlan.period().start().equals(currentPeriod.start())) {
         throw new BusinessRuleException(
             ProblemCodes.START_FIXED,

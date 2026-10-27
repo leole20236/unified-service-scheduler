@@ -233,18 +233,72 @@ class BookingPolicyTest {
 
   @Test
   void inProgressStartChangeRejected() {
-    for (AppointmentStatus status :
-        List.of(AppointmentStatus.IN_PROGRESS, AppointmentStatus.ON_HOLD)) {
-      assertCode(
-          () ->
-              DISPATCHER.checkChange(
-                  status,
-                  range("2026-11-01T09:00:00Z", 60),
-                  oil("2026-11-02T09:30:00Z"),
-                  RIVERSIDE,
-                  NOW),
-          ProblemCodes.START_FIXED);
+    assertCode(
+        () ->
+            DISPATCHER.checkChange(
+                AppointmentStatus.IN_PROGRESS,
+                range("2026-11-01T09:00:00Z", 60),
+                oil("2026-11-02T09:30:00Z"),
+                RIVERSIDE,
+                NOW),
+        ProblemCodes.START_FIXED);
+  }
+
+  @Test
+  void onHoldAnyChangeRejected() {
+    // start change, end change, and same-plan (e.g. technician change) all need a resume first
+    for (JobPlan newPlan :
+        List.of(
+            oil("2026-11-02T09:30:00Z"),
+            twoHours("2026-11-01T09:00:00Z"),
+            oil("2026-11-01T09:00:00Z"))) {
+      assertThatThrownBy(
+              () ->
+                  DISPATCHER.checkChange(
+                      AppointmentStatus.ON_HOLD,
+                      range("2026-11-01T09:00:00Z", 45),
+                      newPlan,
+                      RIVERSIDE,
+                      NOW))
+          .isInstanceOfSatisfying(
+              ApiException.class,
+              e -> {
+                assertThat(e.code()).isEqualTo(ProblemCodes.INVALID_TRANSITION);
+                assertThat(e.getMessage())
+                    .isEqualTo("This job is on hold; resume it before moving or resizing it.");
+              });
     }
+  }
+
+  @Test
+  void leadTimeDetailIsRelativeForChangeAndCancel() {
+    String hours =
+        "This appointment starts in 23 hours; online changes close 24 hours before."
+            + " Please call the dealership.";
+    assertThatThrownBy(
+            () ->
+                CUSTOMER.checkChange(
+                    AppointmentStatus.BOOKED,
+                    range("2026-11-02T09:00:00Z", 60),
+                    oil("2026-11-05T10:00:00Z"),
+                    RIVERSIDE,
+                    NOW))
+        .hasMessage(hours);
+    assertThatThrownBy(
+            () ->
+                CUSTOMER.checkCancel(
+                    AppointmentStatus.BOOKED, range("2026-11-02T09:00:00Z", 60), NOW))
+        .hasMessage(hours);
+    assertThatThrownBy(
+            () ->
+                CUSTOMER.checkCancel(
+                    AppointmentStatus.BOOKED, range("2026-11-01T10:30:00Z", 60), NOW))
+        .hasMessageContaining("starts in less than 1 hour;");
+    assertThatThrownBy(
+            () ->
+                CUSTOMER.checkCancel(
+                    AppointmentStatus.BOOKED, range("2026-11-01T11:30:00Z", 60), NOW))
+        .hasMessageContaining("starts in 1 hour;");
   }
 
   @Test

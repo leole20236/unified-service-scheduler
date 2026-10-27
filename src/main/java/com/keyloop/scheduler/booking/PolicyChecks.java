@@ -78,13 +78,16 @@ final class PolicyChecks {
     }
   }
 
-  static void requireLeadTime(DealershipView d, TimeRange currentPeriod, Instant now) {
+  static void requireLeadTime(TimeRange currentPeriod, Instant now) {
     if (currentPeriod.start().isBefore(now.plus(CHANGE_CUTOFF))) {
+      long hours = Math.max(0, Duration.between(now, currentPeriod.start()).toHours());
+      String remaining =
+          hours == 0 ? "less than 1 hour" : hours + (hours == 1 ? " hour" : " hours");
       throw new BusinessRuleException(
           ProblemCodes.CHANGE_WINDOW_CLOSED,
-          "Changes must be made at least 24 hours before the start at "
-              + (d == null ? currentPeriod.start().toString() : local(d, currentPeriod.start()))
-              + ".");
+          "This appointment starts in "
+              + remaining
+              + "; online changes close 24 hours before. Please call the dealership.");
     }
   }
 
