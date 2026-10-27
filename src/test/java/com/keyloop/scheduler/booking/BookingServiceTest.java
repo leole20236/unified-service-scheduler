@@ -33,6 +33,7 @@ import com.keyloop.scheduler.common.time.DbClock;
 import com.keyloop.scheduler.common.time.TimeRange;
 import com.keyloop.scheduler.customer.CustomerService;
 import com.keyloop.scheduler.customer.VehicleView;
+import com.keyloop.scheduler.hold.SlotLedger;
 import com.keyloop.scheduler.outbox.OutboxWriter;
 import com.keyloop.scheduler.query.AppointmentView;
 import com.keyloop.scheduler.support.CatalogFixtures;
@@ -77,6 +78,7 @@ class BookingServiceTest {
   private final AppointmentRepository appointments = mock(AppointmentRepository.class);
   private final ReservationRepository reservations = mock(ReservationRepository.class);
   private final OutboxWriter outbox = mock(OutboxWriter.class);
+  private final SlotLedger ledger = mock(SlotLedger.class);
   private final List<AppointmentCommitted> committed = new ArrayList<>();
   private BookingListener listener = committed::add;
 
@@ -117,7 +119,8 @@ class BookingServiceTest {
         reservations,
         outbox,
         listener,
-        JSON);
+        JSON,
+        ledger);
   }
 
   private static BookingRequest request(OffsetDateTime start) {
@@ -181,7 +184,7 @@ class BookingServiceTest {
     when(customers.requireVehicleOf(Fixtures.ALICE, Fixtures.ALICE_FOCUS)).thenReturn(focus);
     when(clock.now()).thenReturn(NOW);
     when(occupancy.load(any(), any())).thenReturn(Occupancy.empty());
-    when(dailyOccupancy.forDay(any(), any(), any())).thenReturn(Occupancy.empty());
+    when(dailyOccupancy.forDay(any(), any(), any(), any())).thenReturn(Occupancy.empty());
     when(allocation.rank(any(), any(), any(), any(), any())).thenReturn(ranked);
     when(idempotency.find(any(), anyString(), anyString())).thenReturn(Optional.empty());
     when(reservations.insertAll(any(), any(), any())).thenReturn(inserted());

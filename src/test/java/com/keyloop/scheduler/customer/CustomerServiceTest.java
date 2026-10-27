@@ -53,6 +53,21 @@ class CustomerServiceTest {
   }
 
   @Test
+  void findMyVehicleNeverCreatesProfile() {
+    UUID id = UUID.randomUUID();
+    UUID vehicleId = UUID.randomUUID();
+    VehicleView vehicle = new VehicleView(vehicleId, "VIN", "AB 1", "Ford", "Focus", 2018, 1);
+    when(customers.findIdBySubject(sub)).thenReturn(Optional.of(id));
+    when(vehicles.findOwned(id, vehicleId)).thenReturn(Optional.of(vehicle));
+
+    assertThat(service.findMyVehicle(caller, vehicleId)).contains(vehicle);
+
+    when(customers.findIdBySubject(sub)).thenReturn(Optional.empty());
+    assertThat(service.findMyVehicle(caller, vehicleId)).isEmpty();
+    verify(customers, never()).insertForSubject(any(), any(), any());
+  }
+
+  @Test
   void vehicleNotOwnedIsNotFound() {
     UUID owner = UUID.randomUUID();
     UUID vehicle = UUID.randomUUID();

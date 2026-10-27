@@ -6,6 +6,7 @@ import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 
+import com.keyloop.scheduler.hold.SlotLedger;
 import com.keyloop.scheduler.support.Fixtures;
 import com.keyloop.scheduler.support.Headers;
 import com.keyloop.scheduler.support.IntegrationTest;
@@ -21,10 +22,13 @@ import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 
 class AvailabilityApiIT extends IntegrationTest {
 
   private static final String PATH = "/api/v1/dealerships/{id}/availability";
+
+  @Autowired SlotLedger ledger;
 
   @BeforeEach
   void configure() {
@@ -129,6 +133,8 @@ class AvailabilityApiIT extends IntegrationTest {
         .contains(blockStart.minusSeconds(3600).toString());
 
     jdbc.update("UPDATE resource_reservation SET active = false");
+    // Written behind the slot ledger's back: do what every real writer's write-through does.
+    ledger.markDirty(Fixtures.SOLO, day);
 
     assertThat(startsOf(get(Fixtures.SOLO, oil, from, from))).contains(start);
   }

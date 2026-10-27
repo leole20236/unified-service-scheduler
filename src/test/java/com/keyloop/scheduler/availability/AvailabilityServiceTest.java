@@ -55,7 +55,8 @@ class AvailabilityServiceTest {
             List.of(new TechnicianView(Fixtures.SAM, "Sam", Set.of("OIL", "BRAKES"))));
     when(catalogs.get(Fixtures.RIVERSIDE)).thenReturn(catalog);
     when(clock.now()).thenReturn(NOW);
-    when(occupancy.forDay(eq(Fixtures.RIVERSIDE), any(), any())).thenReturn(Occupancy.empty());
+    when(occupancy.forDay(eq(Fixtures.RIVERSIDE), any(), any(), any()))
+        .thenReturn(Occupancy.empty());
   }
 
   @Test
@@ -91,7 +92,7 @@ class AvailabilityServiceTest {
     assertThat(view.days()).hasSize(14);
     assertThat(view.days().get(6).date()).isEqualTo(LocalDate.of(2026, 11, 8));
     assertThat(view.days().get(6).starts()).isEmpty(); // Sunday is closed
-    verify(occupancy, times(14)).forDay(eq(Fixtures.RIVERSIDE), any(), any());
+    verify(occupancy, times(14)).forDay(eq(Fixtures.RIVERSIDE), any(), any(), any());
   }
 
   @Test

@@ -37,7 +37,10 @@ public class AvailabilityService {
     this.clock = clock;
   }
 
-  /** Starts per local date; the caller's booking policy decides the earliest allowed start. */
+  /**
+   * Starts per local date; the caller's booking policy decides the earliest allowed start. Other
+   * customers' live holds count as taken; the caller's own hold does not.
+   */
   public AvailabilityView find(
       CallerContext caller,
       UUID dealershipId,
@@ -63,7 +66,8 @@ public class AvailabilityService {
     Instant latest = policy.latestStart(now);
     List<AvailabilityView.Day> result = new ArrayList<>();
     for (LocalDate date = from; !date.isAfter(to); date = date.plusDays(1)) {
-      Occupancy occupied = occupancy.forDay(dealershipId, date, catalog.dealership());
+      Occupancy occupied =
+          occupancy.forDay(dealershipId, date, catalog.dealership(), caller.userId());
       List<Instant> starts =
           AvailabilityCalculator.starts(
                   catalog, plan.requiredSkills(), plan.durationMinutes(), date, occupied, earliest)

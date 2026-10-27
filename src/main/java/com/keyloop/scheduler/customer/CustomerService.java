@@ -8,6 +8,7 @@ import com.keyloop.scheduler.common.id.Ids;
 import com.keyloop.scheduler.common.security.CallerContext;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
@@ -52,6 +53,18 @@ public class CustomerService {
   @Transactional
   public VehicleView getMyVehicle(CallerContext caller, UUID vehicleId) {
     return requireOwnedVehicle(currentCustomer(caller), vehicleId);
+  }
+
+  /**
+   * The caller's vehicle as the replica sees it, without creating a profile: for hot paths that
+   * must not touch the primary (holds). Empty may just mean replica lag; callers then ask {@link
+   * #getMyVehicle}.
+   */
+  @Transactional(readOnly = true)
+  public Optional<VehicleView> findMyVehicle(CallerContext caller, UUID vehicleId) {
+    return customers
+        .findIdBySubject(caller.userId())
+        .flatMap(customerId -> vehicles.findOwned(customerId, vehicleId));
   }
 
   /** Adds a vehicle to the caller. */

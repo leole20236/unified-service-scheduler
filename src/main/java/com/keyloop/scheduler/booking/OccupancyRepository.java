@@ -48,4 +48,28 @@ public class OccupancyRepository {
         Timestamp.from(window.end()));
     return new Occupancy(byResource);
   }
+
+  /**
+   * Active reservations overlapping the window with their ids, for rebuilding the Redis slot
+   * ledger. Always from the primary: a lagging replica would bake stale data into the ledger.
+   */
+  @PrimaryRead
+  public List<ReservedInterval> intervals(UUID dealershipId, TimeRange window) {
+    return jdbc.query(
+        """
+        SELECT id, resource_id, start_at, end_at FROM resource_reservation
+        WHERE dealership_id = ? AND active
+          AND period && tstzrange(?::timestamptz, ?::timestamptz, '[)')
+        """,
+        (rs, n) ->
+            new ReservedInterval(
+                rs.getObject("id", UUID.class),
+                rs.getObject("resource_id", UUID.class),
+                new TimeRange(
+                    rs.getTimestamp("start_at").toInstant(),
+                    rs.getTimestamp("end_at").toInstant())),
+        dealershipId,
+        Timestamp.from(window.start()),
+        Timestamp.from(window.end()));
+  }
 }

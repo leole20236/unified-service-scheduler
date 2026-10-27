@@ -29,8 +29,14 @@ import org.testcontainers.containers.PostgreSQLContainer;
 @SpringBootTest(classes = SchedulerApplication.class, webEnvironment = RANDOM_PORT)
 public abstract class IntegrationTest {
 
+  /**
+   * Every cached Spring context keeps two full Hikari pools (20 + 30); a few test classes need a
+   * context of their own (connection counting, short hold TTL, a Redis that is stopped), so the
+   * server allows more than the default 100 clients.
+   */
   private static final PostgreSQLContainer<?> POSTGRES =
-      new PostgreSQLContainer<>("postgres:16.4-alpine");
+      new PostgreSQLContainer<>("postgres:16.4-alpine")
+          .withCommand("postgres", "-c", "fsync=off", "-c", "max_connections=400");
 
   private static final GenericContainer<?> REDIS =
       new GenericContainer<>("redis:7.4.1-alpine").withExposedPorts(6379);

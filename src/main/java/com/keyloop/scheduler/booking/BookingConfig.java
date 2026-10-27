@@ -28,10 +28,4 @@ class BookingConfig {
     template.setReadOnly(false);
     return template;
   }
-
-  /** Does nothing until the slot ledger provides a real listener. */
-  @Bean
-  BookingListener noOpBookingListener() {
-    return event -> {};
-  }
 }

@@ -9,7 +9,9 @@ import com.keyloop.scheduler.catalog.DealershipView;
 import com.keyloop.scheduler.catalog.ResourceCatalog;
 import com.keyloop.scheduler.catalog.ServiceTypeView;
 import com.keyloop.scheduler.catalog.TechnicianView;
+import com.keyloop.scheduler.common.api.BusinessRuleException;
 import com.keyloop.scheduler.common.api.NotFoundException;
+import com.keyloop.scheduler.common.api.ProblemCodes;
 import com.keyloop.scheduler.common.api.SlotUnavailableException;
 import com.keyloop.scheduler.common.api.ValidationException;
 import com.keyloop.scheduler.common.db.SqlStates;
@@ -19,6 +21,11 @@ import com.keyloop.scheduler.common.time.DbClock;
 import com.keyloop.scheduler.common.time.TimeRange;
 import com.keyloop.scheduler.customer.CustomerService;
 import com.keyloop.scheduler.customer.VehicleView;
+import com.keyloop.scheduler.hold.HoldPayload;
+import com.keyloop.scheduler.hold.LedgerFailures;
+import com.keyloop.scheduler.hold.SlotLedger;
+import com.keyloop.scheduler.hold.SlotLedger.HoldLocation;
+import com.keyloop.scheduler.hold.SlotLedger.StoredHold;
 import com.keyloop.scheduler.outbox.OutboxWriter;
 import com.keyloop.scheduler.query.AppointmentRecord;
 import com.keyloop.scheduler.query.AppointmentView;
@@ -27,11 +34,10 @@ import com.keyloop.scheduler.query.ServiceLine;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -42,10 +48,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionOperations;
 
 /**
- * Books appointments on the direct path (spec 8.3): validate, rank candidate pairs from the
- * primary, then try up to three pairs, each in its own READ COMMITTED transaction. The database's
- * EXCLUDE constraint decides every race; a refused pair drops its taken resource and the next pair
- * is tried.
+ * Books appointments (spec 8.3, 8.6). With a live, matching hold the held pair is tried once
+ * (confirm path); otherwise candidate pairs are ranked from the primary and up to three are tried
+ * (direct path). Each attempt is its own READ COMMITTED transaction and the database's EXCLUDE
+ * constraint decides every race; a refused pair drops its taken resource and marks the slot ledger
+ * of that day dirty.
  */
 @Service
 public class BookingService {
@@ -58,10 +65,6 @@ public class BookingService {
   private static final int MAX_KEY_LENGTH = 64;
   private static final String AGGREGATE = "Appointment";
   private static final String BOOKED_EVENT = "AppointmentBooked";
-  private static final DateTimeFormatter CLOCK =
-      DateTimeFormatter.ofPattern("HH:mm", Locale.ENGLISH);
-  private static final DateTimeFormatter DAY =
-      DateTimeFormatter.ofPattern("EEE d MMM", Locale.ENGLISH);
 
   private final CatalogService catalogs;
   private final CustomerService customers;
@@ -76,8 +79,12 @@ public class BookingService {
   private final OutboxWriter outbox;
   private final BookingListener listener;
   private final ObjectMapper json;
+  private final SlotLedger ledger;
 
-  /** Creates the service; {@code transactions} runs each attempt in a new transaction. */
+  /**
+   * Creates the service; {@code transactions} runs each attempt in a new transaction, {@code
+   * ledger} supplies holds and is told about conflicts.
+   */
   public BookingService(
       CatalogService catalogs,
       CustomerService customers,
@@ -91,7 +98,8 @@ public class BookingService {
       ReservationRepository reservations,
       OutboxWriter outbox,
       BookingListener listener,
-      ObjectMapper json) {
+      ObjectMapper json,
+      SlotLedger ledger) {
     this.catalogs = catalogs;
     this.customers = customers;
     this.allocation = allocation;
@@ -105,6 +113,7 @@ public class BookingService {
     this.outbox = outbox;
     this.listener = listener;
     this.json = json;
+    this.ledger = ledger;
   }
 
   /**
@@ -145,11 +154,26 @@ public class BookingService {
     Instant now = clock.now();
     policy.checkNew(plan, catalog.dealership(), now);
 
-    Occupancy occupied = occupancy.load(req.dealershipId(), rankingWindow(catalog, plan));
-    List<ResourcePair> candidates =
-        new ArrayList<>(allocation.rank(catalog, plan, occupied, pinnedBay, pinnedTechnician));
+    Optional<StoredHold> hold = heldFor(caller, req, catalog, plan);
+    List<ResourcePair> candidates;
+    if (hold.isPresent()) {
+      candidates = new ArrayList<>(List.of(hold.get().pair()));
+    } else {
+      Occupancy occupied = occupancy.load(req.dealershipId(), rankingWindow(catalog, plan));
+      candidates =
+          new ArrayList<>(allocation.rank(catalog, plan, occupied, pinnedBay, pinnedTechnician));
+    }
     Attempt attempt =
-        new Attempt(caller, req, idempotencyKey, hash, customerId, vehicle, catalog, plan);
+        new Attempt(
+            caller,
+            req,
+            idempotencyKey,
+            hash,
+            customerId,
+            vehicle,
+            catalog,
+            plan,
+            hold.map(StoredHold::holdId).orElse(null));
     int failures = 0;
     boolean deadlockRetried = false;
     while (failures < MAX_ATTEMPTS && !candidates.isEmpty()) {
@@ -159,6 +183,7 @@ public class BookingService {
         persisted = transactions.execute(status -> persist(attempt, pair));
       } catch (ReservationConflictException e) {
         failures++;
+        markDirty(req.dealershipId(), plan);
         UUID taken = e.resourceId();
         candidates.removeIf(p -> p.bayId().equals(taken) || p.technicianId().equals(taken));
         continue;
@@ -177,7 +202,77 @@ public class BookingService {
       afterCommit(persisted.event());
       return new BookingResult(CREATED, persisted.view(), false);
     }
-    throw unavailable(channel, policy, now, catalog, plan, pinnedBay, pinnedTechnician);
+    throw unavailable(caller, channel, policy, now, catalog, plan, pinnedBay, pinnedTechnician);
+  }
+
+  /**
+   * The caller's live hold named by the request, checked against it (spec 8.6 confirm): someone
+   * else's hold is a 404, a hold for another dealership, start or service set a 422. A hold that is
+   * gone (expired, flushed, Redis unreachable) yields empty: the direct path then runs and the
+   * database still decides.
+   */
+  private Optional<StoredHold> heldFor(
+      CallerContext caller, BookingRequest req, ResourceCatalog catalog, JobPlan plan) {
+    if (req.holdId() == null) {
+      return Optional.empty();
+    }
+    Optional<HoldLocation> location;
+    Optional<StoredHold> hold;
+    try {
+      location = ledger.locate(req.holdId());
+      hold = location.flatMap(l -> ledger.getHold(l.dealershipId(), l.date(), req.holdId()));
+    } catch (RuntimeException e) {
+      if (!LedgerFailures.isRedisFailure(e)) {
+        throw e;
+      }
+      LOG.warn("Hold {} unreadable, booking on the direct path: {}", req.holdId(), e.toString());
+      return Optional.empty();
+    }
+    if (hold.isEmpty()) {
+      return Optional.empty();
+    }
+    StoredHold h = hold.get();
+    if (!h.userId().equals(caller.userId())) {
+      throw new NotFoundException("Hold not found.");
+    }
+    if (!location.get().dealershipId().equals(req.dealershipId())) {
+      throw new BusinessRuleException(
+          ProblemCodes.HOLD_MISMATCH, "Your hold is for another dealership.");
+    }
+    List<UUID> heldServices = HoldPayload.parse(h.payloadJson()).serviceTypeIds();
+    if (!h.period().start().equals(plan.period().start())
+        || !new HashSet<>(heldServices).equals(new HashSet<>(req.serviceTypeIds()))) {
+      throw new BusinessRuleException(
+          ProblemCodes.HOLD_MISMATCH,
+          "Your hold is for "
+              + describe(catalog, h.period().start(), heldServices)
+              + "; this request asks for "
+              + describe(catalog, plan.period().start(), req.serviceTypeIds())
+              + ".");
+    }
+    return hold;
+  }
+
+  private static String describe(ResourceCatalog catalog, Instant start, List<UUID> services) {
+    List<String> names = new ArrayList<>();
+    for (UUID id : services) {
+      catalog.services().stream()
+          .filter(s -> s.id().equals(id))
+          .findFirst()
+          .ifPresent(s -> names.add(s.name()));
+    }
+    return SlotMessages.at(start.atZone(catalog.dealership().zoneId()).toLocalDateTime())
+        + " with "
+        + String.join(", ", names);
+  }
+
+  /** A refused write means the ledger let a taken slot through: rebuild it before its next use. */
+  private void markDirty(UUID dealershipId, JobPlan plan) {
+    try {
+      ledger.markDirty(dealershipId, plan.localDate());
+    } catch (RuntimeException e) {
+      LOG.warn("Could not mark ledger of {} dirty: {}", dealershipId, e.toString());
+    }
   }
 
   /** Everything one attempt needs besides the pair. */
@@ -189,7 +284,8 @@ public class BookingService {
       UUID customerId,
       VehicleView vehicle,
       ResourceCatalog catalog,
-      JobPlan plan) {}
+      JobPlan plan,
+      UUID holdId) {}
 
   /** What a committed attempt produced. */
   private record Persisted(AppointmentView view, AppointmentCommitted event) {}
@@ -241,9 +337,7 @@ public class BookingService {
     AppointmentView view = AppointmentViewMapper.toView(record(id, a, pair));
     idempotency.complete(userId, a.key(), CREATED, view);
     return new Persisted(
-        view,
-        new AppointmentCommitted(
-            id, dealershipId, plan.localDate(), a.request().holdId(), reserved));
+        view, new AppointmentCommitted(id, dealershipId, plan.localDate(), a.holdId(), reserved));
   }
 
   private static AppointmentRecord record(UUID id, Attempt a, ResourcePair pair) {
@@ -306,6 +400,7 @@ public class BookingService {
   }
 
   private SlotUnavailableException unavailable(
+      CallerContext caller,
       BookingChannel channel,
       BookingPolicy policy,
       Instant now,
@@ -318,7 +413,7 @@ public class BookingService {
         AvailabilityCalculator.alternatives(
                 catalog,
                 plan,
-                date -> dailyOccupancy.forDay(d.id(), date, d),
+                date -> dailyOccupancy.forDay(d.id(), date, d, caller.userId()),
                 policy.earliestStart(now),
                 policy.latestStart(now),
                 MAX_ALTERNATIVES)
@@ -344,16 +439,7 @@ public class BookingService {
           reservations.conflictingAppointments(
               d.id(), technicians, plan.period(), bays, plan.bayPeriod());
     }
-    return new SlotUnavailableException(
-        "No qualified technician and bay are free at "
-            + CLOCK.format(plan.localStart())
-            + " on "
-            + DAY.format(plan.localStart())
-            + " ("
-            + d.zoneId().getId()
-            + ").",
-        alternatives,
-        conflicts);
+    return new SlotUnavailableException(SlotMessages.unavailable(plan, d), alternatives, conflicts);
   }
 
   /** The local day (plus any overrun of the bay period) on the primary, for ranking. */
