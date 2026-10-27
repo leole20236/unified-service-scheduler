@@ -9,7 +9,7 @@ import com.keyloop.scheduler.common.security.DealershipAccess;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Size;
-import java.time.OffsetDateTime;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -43,7 +43,7 @@ public class ProbeController {
   void slot() {
     throw new SlotUnavailableException(
         "No qualified technician and bay are free.",
-        List.of(OffsetDateTime.parse("2026-11-02T09:15:00Z")),
+        List.of(Instant.parse("2026-11-02T09:15:00Z")),
         List.of());
   }
 

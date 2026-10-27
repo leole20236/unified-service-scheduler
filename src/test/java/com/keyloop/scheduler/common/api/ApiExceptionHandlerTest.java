@@ -7,7 +7,7 @@ import jakarta.validation.ConstraintViolation;
 import jakarta.validation.ConstraintViolationException;
 import jakarta.validation.Path;
 import java.lang.reflect.Method;
-import java.time.OffsetDateTime;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -116,7 +116,7 @@ class ApiExceptionHandlerTest {
 
   @Test
   void slotUnavailableCarriesAlternativesAndConflicts() {
-    List<OffsetDateTime> alternatives = List.of(OffsetDateTime.parse("2026-11-02T09:15:00Z"));
+    List<Instant> alternatives = List.of(Instant.parse("2026-11-02T09:15:00Z"));
     List<UUID> conflicts = List.of(UUID.randomUUID());
     ResponseEntity<ProblemDetail> response =
         handler.handleApi(
@@ -126,6 +126,19 @@ class ApiExceptionHandlerTest {
     assertThat(response.getBody().getProperties())
         .containsEntry("alternatives", alternatives)
         .containsEntry("conflicts", conflicts);
+  }
+
+  @Test
+  void slotUnavailableWithoutConflictsOmitsTheKey() {
+    ResponseEntity<ProblemDetail> response =
+        handler.handleApi(
+            new SlotUnavailableException(
+                "none free", List.of(Instant.parse("2026-11-02T09:15:00Z")), null),
+            request);
+
+    assertThat(response.getBody().getProperties())
+        .containsKey("alternatives")
+        .doesNotContainKey("conflicts");
   }
 
   @Test
