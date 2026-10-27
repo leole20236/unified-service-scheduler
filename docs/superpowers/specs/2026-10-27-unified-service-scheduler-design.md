@@ -164,11 +164,20 @@ global load balancer routes each request to that region.
 | Transition | Effect on reservations |
 |---|---|
 | → `CANCELLED`, → `NO_SHOW` | Reservations set `active = false` ⇒ time is released immediately. Row kept for audit/reporting. |
-| → `COMPLETED` before planned end | Reservation end is shrunk to completion time ⇒ remaining time released. |
-| `ON_HOLD` | Reservations kept (bay is physically occupied). Dispatcher may move/resize. |
+| → `COMPLETED` | Means **workshop work is done**: both reservations end at completion time ⇒ remaining planned time released (bay keeps its buffer). Quality check, hand-over to the customer and invoicing belong to the DMS **repair order**, not to this scheduler; the DMS listens to `AppointmentStatusChanged`. |
+| → `ON_HOLD` | Requires `holdReason`: `PARTS` (waiting for parts) or `CUSTOMER_APPROVAL` (extra work found, waiting for the customer's go-ahead). Minutes worked so far are added to `worked_minutes`. **Technician reservation ends at `now()`** — the technician moves on to other jobs. **Bay is kept** by default (car stays on the lift); with `releaseBay: true` the bay reservation also ends at `now()` (car moved to the yard). |
+| `ON_HOLD` → `IN_PROGRESS` (`RESUME`) | Dispatcher gives `resumeAt` (default now) and optionally another technician/bay. Remaining minutes = planned duration − `worked_minutes`. Both reservations are set to `[resumeAt, resumeAt + remaining)` (bay + buffer) and `appointment.period` end moves accordingly, in one transaction ⇒ `409 SLOT_UNAVAILABLE` if that conflicts, and the dispatcher picks another time or person. |
 | Overrun (`IN_PROGRESS` past planned end) | Not auto-extended. Gantt shows overrun; dispatcher extends via resize, which can conflict ⇒ dispatcher resolves by moving later jobs. |
 
+Past segments (time already worked before a hold) are not kept in `resource_reservation`:
+nobody can book the past, so only current and future occupancy matters for conflicts. The
+work history lives in the appointment row (`worked_minutes`) and in the events.
+
 Any transition not in the diagram ⇒ `409 INVALID_TRANSITION`.
+
+**Out of scope (documented, not built):** multi-day jobs, a `CONFIRMED` state from reminder
+replies, technician clock-on/off, and the post-workshop chain (QC → ready for collection →
+collected → invoiced), which is the DMS repair order's job.
 
 ### 6.3 Booking rules (validation order)
 
@@ -194,7 +203,8 @@ Implemented as one `BookingPolicy` interface with `CustomerBookingPolicy` and
 | Start granularity | Any minute (UI offers 15-min steps) | Any minute |
 | Change / cancel window | Own `BOOKED` jobs, until 24h before start; reschedule re-allocates resources via a new hold | Any non-terminal job, no time cutoff |
 | `CHECKED_IN` | — | Move time, change bay/technician, resize |
-| `IN_PROGRESS` / `ON_HOLD` | — | Start is fixed; may change bay/technician or extend/shrink the end |
+| `IN_PROGRESS` | — | Start is fixed; may change bay/technician or extend/shrink the end |
+| `ON_HOLD` | — | Only `RESUME` (with a new start) or release the bay; no drag-and-drop until resumed |
 | Choose resources | No (system allocates) | Optional: pin bay and/or technician (technician must hold all required skills ⇒ else `422 TECHNICIAN_NOT_QUALIFIED`) |
 | Other | — | Status transitions; book for a customer (phone/walk-in), create customer + vehicle inline; create/remove resource blocks |
 
@@ -278,6 +288,9 @@ CREATE TABLE appointment (
   period         tstzrange NOT NULL CHECK (NOT isempty(period) AND lower_inc(period) AND NOT upper_inc(period)),
   local_start    timestamp NOT NULL,               -- wall-clock start in dealership zone (§12.2)
   status         text NOT NULL,                    -- BOOKED | CHECKED_IN | IN_PROGRESS | ON_HOLD | COMPLETED | CANCELLED | NO_SHOW
+  hold_reason    text CHECK (hold_reason IN ('PARTS','CUSTOMER_APPROVAL')),  -- set while ON_HOLD
+  worked_minutes int NOT NULL DEFAULT 0,           -- accumulated on HOLD / COMPLETE
+  started_at     timestamptz,                      -- start of the current IN_PROGRESS stint
   version        bigint NOT NULL DEFAULT 0,        -- optimistic locking
   customer_notes text,
   created_by     uuid NOT NULL,
@@ -792,7 +805,7 @@ Full OpenAPI 3.1 spec is generated from code (springdoc) and committed as
 | `POST /dealerships/{d}/customers/{customerId}/vehicles` | Add a vehicle for that customer |
 | `POST /dealerships/{d}/appointments` *(Idempotency-Key)* | Book on behalf of a customer: `{ customerId, vehicleId, serviceTypeIds, start, serviceBayId?, technicianId?, overrideHold? }` — direct path (§8.3) with the dispatcher policy (§6.4) |
 | `PATCH /dealerships/{d}/appointments/{id}` *(If-Match)* | Move / reassign / resize (drag-and-drop) |
-| `POST /dealerships/{d}/appointments/{id}/transitions` | `{ "action": "CHECK_IN" \| "START" \| "HOLD" \| "RESUME" \| "COMPLETE" \| "NO_SHOW" \| "CANCEL" }` |
+| `POST /dealerships/{d}/appointments/{id}/transitions` | `{ "action": "CHECK_IN" \| "START" \| "HOLD" \| "RESUME" \| "COMPLETE" \| "NO_SHOW" \| "CANCEL" }`; `HOLD` also takes `holdReason` (required) and `releaseBay` (default `false`); `RESUME` takes `resumeAt` (default now), optional `technicianId`, `serviceBayId` |
 | `POST /dealerships/{d}/resource-blocks` · `DELETE /dealerships/{d}/resource-blocks/{id}` | Block / unblock a bay or technician |
 
 ### 14.3 Key payloads
@@ -933,7 +946,8 @@ extension.
  Bay 2   │░░░░░░ Lift maintenance (block) ░░░░░░│  │████ KL20 Brakes ████▌overrun
  Bay 3   │          │▓▓▓ JK70 Service ▓▓▓│
          └ unassigned / waiting list ───────────────────────────────────────────────────────
- Legend: ▓ BOOKED  █ IN_PROGRESS  ▒ ON_HOLD  ░ BLOCK  ▌ overrun   now ▏
+ Legend: ▓ BOOKED  █ IN_PROGRESS  ▒ ON_HOLD (🔧 parts / 💬 awaiting approval, remaining time
+         shown unscheduled until RESUME)  ░ BLOCK  ▌ overrun   now ▏
 ```
 
 Interactions → API:

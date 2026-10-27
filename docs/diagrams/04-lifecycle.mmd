@@ -1,13 +1,13 @@
 stateDiagram-v2
     [*] --> BOOKED
-    BOOKED --> CHECKED_IN : dispatcher check-in
+    BOOKED --> CHECKED_IN : vehicle arrives, advisor checks in
     BOOKED --> CANCELLED : customer 24h+ before, or dispatcher
     BOOKED --> NO_SHOW : start + 30 min grace
-    CHECKED_IN --> IN_PROGRESS : start work
-    CHECKED_IN --> CANCELLED : dispatcher
-    IN_PROGRESS --> ON_HOLD : waiting for parts
-    ON_HOLD --> IN_PROGRESS : resume
-    IN_PROGRESS --> COMPLETED : finish
-    COMPLETED --> [*]
+    CHECKED_IN --> IN_PROGRESS : technician starts
+    CHECKED_IN --> CANCELLED : customer declines work
+    IN_PROGRESS --> ON_HOLD : PARTS or CUSTOMER_APPROVAL, technician released
+    ON_HOLD --> IN_PROGRESS : resume, remaining minutes re-reserved
+    IN_PROGRESS --> COMPLETED : workshop work done, bay and technician released
+    COMPLETED --> [*] : QC, hand-over, invoice live in the DMS repair order
     CANCELLED --> [*]
     NO_SHOW --> [*]
