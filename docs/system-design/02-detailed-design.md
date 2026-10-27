@@ -449,9 +449,22 @@ still comes from §11.3).
 
 `no_double_booking` makes it **physically impossible** for two active reservations on the
 same resource to overlap, regardless of how many app instances race. PostgreSQL checks the
-GiST exclusion index at insert/update; a concurrent conflicting transaction blocks on the
-index entry and then fails with SQLSTATE `23P01 exclusion_violation`. No application lock,
-no Redis lock, no `SERIALIZABLE` needed; `READ COMMITTED` is enough.
+GiST exclusion index at insert/update; a conflicting transaction fails with SQLSTATE
+`23P01 exclusion_violation`. No Redis lock and no `SERIALIZABLE` needed; `READ COMMITTED` is
+enough.
+
+**Found by the concurrency tests — exclusion-wait deadlocks.** PostgreSQL's exclusion check
+inserts the new index entry first and *then* waits on any in-progress conflicting entry. Two
+transactions inserting overlapping ranges at the same instant therefore wait on each other —
+a deadlock (`40P01`) that no insert ordering prevents. With 50 simultaneous requests for one
+slot the first test run produced 209 deadlocks. **Fix:** before writing reservations, each
+transaction takes `pg_advisory_xact_lock` on every resource it will touch, in one global
+order (sorted, de-duplicated). Writers to the same bay/technician now queue instead of
+deadlocking; the lock is transaction-scoped (released at commit/rollback, safe with PgBouncer
+transaction pooling). The lock only serialises writers per resource — **the `EXCLUDE`
+constraint remains the sole correctness guarantee**: the code still inserts and still handles
+`23P01`. Result: 0 deadlocks, every race test green. Every writer of `resource_reservation`
+(booking, confirm, reschedule, drag-and-drop, resume, blocks) uses the same lock helper.
 
 ### 8.2 Why not the alternatives
 
@@ -607,7 +620,7 @@ performance.
 | 1 | Two requests book overlapping time on one bay/technician | `EXCLUDE` on `resource_reservation` (§8.1); Redis hold filters most collisions earlier (§8.6) |
 | 2 | Bay taken but technician not (partial booking) | Both reservations, appointment and outbox in **one** transaction |
 | 3 | `appointment.period` disagrees with its reservations | Only changed together in one transaction by one repository method; integration test asserts the invariant after every command |
-| 4 | Deadlock: two transactions update the same two resources in opposite order | Reservations always inserted/updated **ordered by `resource_id`**; any remaining `40P01` is retried once |
+| 4 | Deadlock: concurrent writers on the same resource (exclusion-wait deadlock, or opposite update order) | Per-resource `pg_advisory_xact_lock` taken in one global (sorted) order before any reservation write (§8.1); any remaining `40P01` is retried once |
 | 5 | Lost update: two dispatchers move the same job | `If-Match` version ⇒ `412` |
 | 6 | Conflicting status changes (check-in vs. cancel) | Conditional `UPDATE … WHERE status = ANY(:allowedFrom)` (§8.4) |
 | 7 | Duplicate booking from client retry | Idempotency key as first insert (§8.5) |

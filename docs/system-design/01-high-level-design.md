@@ -174,6 +174,7 @@ says what to do next.
 |---|---|
 | Two people book the same time | `EXCLUDE` constraint; Redis hold rejects most collisions earlier. **Proven by concurrency tests**: 50–100 simultaneous requests, mixed durations, every write path at once, and two app instances sharing one database ⇒ never more than one booking per bay/technician slot |
 | Redis loses data or is down | Database still decides; ledger rebuilds itself; booking falls back to the direct path |
+| Simultaneous overlapping inserts deadlock inside PostgreSQL (found by our 50-thread test: 209 deadlocks) | Per-resource transaction-scoped advisory lock in a fixed order queues writers; `EXCLUDE` still decides — 0 deadlocks |
 | Two dispatchers move the same job | `If-Match` ⇒ `412` |
 | Client retries a booking | `Idempotency-Key` ⇒ same appointment returned |
 | Event lost or sent twice | Outbox (never lost) + consumers deduplicate by event id and version |
