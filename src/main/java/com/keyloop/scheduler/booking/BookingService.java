@@ -37,6 +37,7 @@ import java.util.Optional;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionOperations;
 
@@ -84,7 +85,7 @@ public class BookingService {
       OccupancyRepository occupancy,
       OccupancySource dailyOccupancy,
       DbClock clock,
-      TransactionOperations transactions,
+      @Qualifier(BookingConfig.BOOKING_TRANSACTIONS) TransactionOperations transactions,
       IdempotencyStore idempotency,
       AppointmentRepository appointments,
       ReservationRepository reservations,

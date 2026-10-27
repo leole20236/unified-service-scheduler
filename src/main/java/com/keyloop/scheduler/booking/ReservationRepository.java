@@ -19,18 +19,21 @@ import org.springframework.stereotype.Repository;
 public class ReservationRepository {
 
   /**
-   * Insert order: by resource id as PostgreSQL orders uuids (unsigned bytes = lowercase hex text).
-   * Every transaction takes its index entries in the same order, so two bookings never wait on each
-   * other in a cycle (spec 8.7 #4).
+   * Insert order: by resource id as PostgreSQL orders uuids (unsigned bytes = lowercase hex text),
+   * the same order {@link ResourceLocks} locks in. The order alone does not prevent waits: it is
+   * the advisory locks taken first that queue concurrent writers of one resource (spec 8.1); the
+   * fixed order just keeps rows and log output deterministic.
    */
-  static final Comparator<ReservationRow> LOCK_ORDER =
-      Comparator.comparing(r -> r.resourceId().toString());
+  static final Comparator<ReservationRow> INSERT_ORDER =
+      Comparator.comparing(ReservationRow::resourceId, ResourceLocks.UUID_ORDER);
 
   private final JdbcTemplate jdbc;
+  private final ResourceLocks locks;
 
   /** Creates the repository over the routing data source. */
-  public ReservationRepository(JdbcTemplate jdbc) {
+  public ReservationRepository(JdbcTemplate jdbc, ResourceLocks locks) {
     this.jdbc = jdbc;
+    this.locks = locks;
   }
 
   /**
@@ -41,9 +44,9 @@ public class ReservationRepository {
    */
   public Map<UUID, ReservationRow> insertAll(
       UUID appointmentId, UUID dealershipId, List<ReservationRow> rows) {
-    lockResources(rows);
+    locks.lockAll(rows.stream().map(ReservationRow::resourceId).toList());
     Map<UUID, ReservationRow> inserted = new LinkedHashMap<>();
-    for (ReservationRow row : rows.stream().sorted(LOCK_ORDER).toList()) {
+    for (ReservationRow row : rows.stream().sorted(INSERT_ORDER).toList()) {
       UUID id = Ids.newId();
       String column =
           ReservationRow.BAY.equals(row.resourceType()) ? "service_bay_id" : "technician_id";
@@ -68,31 +71,6 @@ public class ReservationRepository {
       inserted.put(id, row);
     }
     return inserted;
-  }
-
-  /**
-   * Takes a transaction-scoped advisory lock per resource, in ascending lock-key order.
-   *
-   * <p>Why: PostgreSQL adds a row's index entry <em>before</em> checking the EXCLUDE constraint, so
-   * two transactions inserting overlapping reservations for one resource at the same moment each
-   * find the other's uncommitted entry and wait for the other transaction to end: a deadlock
-   * (40P01) that the detector breaks only after {@code deadlock_timeout}, whatever the insert
-   * order. Queueing writers of the same resource on a lock first means the exclusion check only
-   * ever sees committed rows, so a race ends in a clean 23P01 or success. The lock only orders
-   * writers; EXCLUDE remains the guarantee. Locks are released at commit or rollback. A hash
-   * collision between two resources merely serialises them; sorting by key keeps the order global.
-   */
-  private void lockResources(List<ReservationRow> rows) {
-    long[] keys =
-        rows.stream().mapToLong(r -> lockKey(r.resourceId())).sorted().distinct().toArray();
-    for (long key : keys) {
-      jdbc.queryForList("SELECT pg_advisory_xact_lock(?)", key);
-    }
-  }
-
-  /** 64-bit advisory lock key of a resource. */
-  static long lockKey(UUID resourceId) {
-    return resourceId.getMostSignificantBits() ^ resourceId.getLeastSignificantBits();
   }
 
   /**
