@@ -35,8 +35,7 @@ class ArchitectureTest {
           .haveSimpleNameEndingWith("Controller")
           .should()
           .dependOnClassesThat()
-          .haveSimpleNameEndingWith("Repository")
-          .allowEmptyShould(true);
+          .haveSimpleNameEndingWith("Repository");
 
   @ArchTest
   static final ArchRule unitTestsDoNotStartSpring =
@@ -48,6 +47,5 @@ class ArchitectureTest {
           .should()
           .notBeAnnotatedWith(SpringBootTest.class)
           .andShould()
-          .notBeAssignableTo(IntegrationTest.class)
-          .allowEmptyShould(true);
+          .notBeAssignableTo(IntegrationTest.class);
 }
