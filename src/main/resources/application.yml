@@ -1,0 +1,17 @@
+spring:
+  application:
+    name: unified-service-scheduler
+  threads:
+    virtual:
+      enabled: true
+  flyway:
+    fail-on-missing-locations: false
+
+server:
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
