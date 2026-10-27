@@ -74,6 +74,57 @@ public class ReservationRepository {
   }
 
   /**
+   * Moves the appointment's active reservations to the target resources and periods, updating in
+   * resource id order (the same rows keep their ids). Takes the advisory locks of the targets
+   * itself; callers lock the old resources too before updating the appointment. A refused row
+   * (23P01) raises {@link ReservationConflictException}; the transaction must then roll back.
+   * Returns the moved rows by reservation id.
+   */
+  public Map<UUID, ReservationRow> move(UUID appointmentId, List<ReservationRow> target) {
+    locks.lockAll(target.stream().map(ReservationRow::resourceId).toList());
+    Map<UUID, ReservationRow> moved = new LinkedHashMap<>();
+    for (ReservationRow row : target.stream().sorted(INSERT_ORDER).toList()) {
+      String column =
+          ReservationRow.BAY.equals(row.resourceType()) ? "service_bay_id" : "technician_id";
+      List<UUID> ids;
+      try {
+        ids =
+            jdbc.queryForList(
+                "UPDATE resource_reservation SET "
+                    + column
+                    + " = ?, start_at = ?, end_at = ? WHERE appointment_id = ? AND active AND "
+                    + column
+                    + " IS NOT NULL RETURNING id",
+                UUID.class,
+                row.resourceId(),
+                Timestamp.from(row.period().start()),
+                Timestamp.from(row.period().end()),
+                appointmentId);
+      } catch (DataAccessException e) {
+        if (SqlStates.has(e, SqlStates.EXCLUSION_VIOLATION)) {
+          throw new ReservationConflictException(row.resourceId());
+        }
+        throw e;
+      }
+      if (ids.size() != 1) {
+        throw new IllegalStateException(
+            "Appointment " + appointmentId + " has " + ids.size() + " active " + column + " rows");
+      }
+      moved.put(ids.get(0), row);
+    }
+    return moved;
+  }
+
+  /** Deactivates the appointment's active reservations; returns their ids. */
+  public List<UUID> deactivate(UUID appointmentId) {
+    return jdbc.queryForList(
+        "UPDATE resource_reservation SET active = false"
+            + " WHERE appointment_id = ? AND active RETURNING id",
+        UUID.class,
+        appointmentId);
+  }
+
+  /**
    * Ids of active appointments holding one of the technicians during {@code period} or one of the
    * bays during {@code bayPeriod} (for the dispatcher's {@code conflicts[]}).
    */
