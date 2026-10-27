@@ -5,6 +5,11 @@ spring:
     virtual:
       enabled: true
 
+  data:
+    redis:
+      timeout: 100ms
+      connect-timeout: 100ms
+
 app:
   datasource:
     primary:
