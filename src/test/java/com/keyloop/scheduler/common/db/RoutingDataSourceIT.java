@@ -45,7 +45,7 @@ class RoutingDataSourceIT extends IntegrationTest {
 
   @Test
   void dbClockInsideReadOnlyTransactionIsServedByPrimary() {
-    assertThat(probe.dbClockPoolsInReadOnly()).containsExactly(PRIMARY);
+    assertThat(probe.dbClockPoolInReadOnly()).isEqualTo(PRIMARY);
   }
 
   @TestConfiguration
@@ -125,12 +125,9 @@ class RoutingDataSourceIT extends IntegrationTest {
     }
 
     @Transactional(readOnly = true)
-    public java.util.List<String> dbClockPoolsInReadOnly() {
+    public String dbClockPoolInReadOnly() {
       dbClock.now();
-      // pg_stat_activity keeps the last statement of every pooled connection
-      return jdbc.queryForList(
-          "SELECT DISTINCT application_name FROM pg_stat_activity WHERE query = 'SELECT now()'",
-          String.class);
+      return dbClock.servedBy();
     }
   }
 }

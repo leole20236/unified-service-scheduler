@@ -25,4 +25,9 @@ public class DbClock {
   public Instant now() {
     return jdbc.queryForObject("SELECT now()", OffsetDateTime.class).toInstant();
   }
+
+  /** Diagnostic: the application_name of the connection this clock uses (identifies its pool). */
+  public String servedBy() {
+    return jdbc.queryForObject("SHOW application_name", String.class);
+  }
 }
