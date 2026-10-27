@@ -1139,7 +1139,8 @@ answer always wins.
 **Build gates (`mvn verify`)**
 - Spotless (google-java-format) — formatting.
 - Checkstyle (Google checks, build fails on violation).
-- JaCoCo — coverage threshold ≥ 80 % on domain + command packages.
+- **Two suites:** unit tests (`*Test`, no Spring, no Docker) and integration tests (`*IT`, real PostgreSQL + Redis via Testcontainers). Every feature has both.
+- JaCoCo — **unit tests alone ≥ 90 % line / ≥ 80 % branch** (infrastructure-bound classes — controllers, repositories, Redis ledger, config — are excluded from this gate) and **unit + integration merged ≥ 90 % line** over all code. Either gate failing fails the build.
 - OWASP Dependency-Check — fails on CVSS ≥ 7 (account-free fallback).
 - ArchUnit — command/query separation, no controller → repository shortcuts.
 

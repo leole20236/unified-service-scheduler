@@ -28,7 +28,13 @@
 - Holds: TTL 10 min; one active hold per user per dealership-day; ledger marker TTL 10 min; catalog cache TTL 10 min; Redis command timeout 100 ms.
 - `Idempotency-Key` required on `POST …/appointments` (else `428`); `If-Match` required on `PATCH` (else `428`); version mismatch ⇒ `412 VERSION_CONFLICT`.
 - No-show allowed only after start + 30 min. Archival deletes reservations ended > 30 days; idempotency keys expire after 24h.
-- Build gates in `./mvnw verify`: Spotless check, Checkstyle (Google checks, fail on violation), JaCoCo ≥ 0.80 line coverage on `booking`, `hold`, `availability`, `common.time` packages, ArchUnit.
+- **Two test suites, both mandatory:** unit tests `*Test` (Surefire, plain JUnit + Mockito, no Spring context, no Docker, < 1 s each) and integration tests `*IT` (Failsafe, `IntegrationTest` base, real PostgreSQL + Redis via Testcontainers). Every task ships **both**: unit tests for its logic, integration tests for its SQL/Redis/HTTP behaviour.
+- **Coverage gates (JaCoCo, fail the build):**
+  - **Unit gate — unit tests alone: ≥ 90 % LINE and ≥ 80 % BRANCH** over all classes except those that only make sense against real infrastructure: `*Controller`, `*Repository`, `IdempotencyStore`, `SlotLedger`, `LedgerOccupancySource`, `*Config`, `SchedulerApplication`. Those are covered by the integration gate.
+  - **Overall gate — unit + integration merged: ≥ 90 % LINE** over every class except `SchedulerApplication`.
+- Other build gates in `./mvnw verify`: Spotless check, Checkstyle (Google checks, fail on violation), ArchUnit.
+- Every task's final step before commit runs `./mvnw verify` (both suites + both gates) — a task is not done if coverage drops below the gates.
+- Running one suite while developing: unit `./mvnw -q test -Dtest='<pattern>'`; integration `./scripts/it.sh '<pattern>'` (Task 1).
 - Docker images pinned: `postgres:16.4-alpine` (tests), `bitnami/postgresql:16.4.0` (compose primary/replica), `redis:7.4.1-alpine`, `opensearchproject/opensearch:2.17.1`, `opensearchproject/opensearch-dashboards:2.17.1`, `fluent/fluent-bit:3.1.9`, `eclipse-temurin:21.0.5_11-jre-alpine`.
 - Logs never contain email, phone, name or VIN — only IDs.
 
@@ -85,12 +91,14 @@ README.md
 ### Task 1: Project scaffold, build gates and test harness
 
 **Files:**
-- Create: `pom.xml`, `mvnw`, `.mvn/wrapper/maven-wrapper.properties`, `config/checkstyle/google_checks.xml`, `config/checkstyle/suppressions.xml`, `src/main/java/com/keyloop/scheduler/SchedulerApplication.java`, `src/main/resources/application.yml`, `src/test/java/com/keyloop/scheduler/support/IntegrationTest.java`, `src/test/java/com/keyloop/scheduler/ArchitectureTest.java`
+- Create: `pom.xml`, `mvnw`, `.mvn/wrapper/maven-wrapper.properties`, `config/checkstyle/google_checks.xml`, `config/checkstyle/suppressions.xml`, `scripts/it.sh`, `src/main/java/com/keyloop/scheduler/SchedulerApplication.java`, `src/main/resources/application.yml`, `src/test/java/com/keyloop/scheduler/support/IntegrationTest.java`, `src/test/java/com/keyloop/scheduler/ArchitectureTest.java`
 - Test: `src/test/java/com/keyloop/scheduler/ApplicationStartsIT.java`
 
 **Interfaces:**
 - Produces: `abstract class IntegrationTest` — `@SpringBootTest(webEnvironment = RANDOM_PORT)`, static singleton containers `postgres:16.4-alpine` and `redis:7.4.1-alpine`, `@DynamicPropertySource` wiring **both** `app.datasource.primary.*` and `app.datasource.replica.*` to the same Postgres container, `spring.data.redis.*`; protected `int port`; `@BeforeEach` truncates all non-reference tables (`appointment`, `appointment_service`, `resource_reservation`, `outbox_event`, `idempotency_key`, customers/vehicles created by tests) and runs `FLUSHALL` on Redis.
-- Produces: Maven profiles: default `verify` = tests + Spotless check + Checkstyle + JaCoCo check + ArchUnit; `-Psecurity` = OWASP Dependency-Check (`failBuildOnCVSS=7`).
+- Produces: Maven profiles: default `verify` = unit tests (Surefire, `**/*Test.java`) + integration tests (Failsafe, `**/*IT.java`) + Spotless check + Checkstyle + both JaCoCo gates + ArchUnit; `-Psecurity` = OWASP Dependency-Check (`failBuildOnCVSS=7`).
+- Produces: JaCoCo executions: `prepare-agent` → `target/jacoco-unit.exec`; `prepare-agent-integration` → `target/jacoco-it.exec`; `merge` → `target/jacoco-merged.exec`; `check-unit` (unit exec, excludes listed in Global Constraints, LINE ≥ 0.90, BRANCH ≥ 0.80); `check-overall` (merged exec, LINE ≥ 0.90); reports `report` + `report-integration` + merged report in `target/site/jacoco-merged/`.
+- Produces: `scripts/it.sh <pattern>` — runs only the matching integration tests: `./mvnw -q verify -DskipUTs=true -Dit.test="$1" -Djacoco.skip=true` (Surefire `skipTests` bound to `skipUTs`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -98,6 +106,7 @@ README.md
 `ArchitectureTest` (ArchUnit, `@AnalyzeClasses(packages = "com.keyloop.scheduler")`):
 - `queryPackagesDoNotDependOnCommandRepositories`: classes in `..query..` and `..availability..` must not depend on `..booking..*Repository`.
 - `controllersDoNotUseRepositoriesDirectly`: classes named `*Controller` must not depend on classes named `*Repository`.
+- `unitTestsDoNotStartSpring`: test classes named `*Test` must not be annotated with `@SpringBootTest` nor extend `IntegrationTest`.
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -106,17 +115,17 @@ Expected: FAIL (no application class / compilation error).
 
 - [ ] **Step 3: Implement scaffold**
 
-`pom.xml`: parent `spring-boot-starter-parent:3.5.6`, `java.version=21`, dependencies listed in Tech Stack; Spotless with `googleJavaFormat 1.28.0`; `maven-checkstyle-plugin` 3.6.0 with Checkstyle 10.26.1, `config/checkstyle/google_checks.xml`, `violationSeverity=warning`, `failOnViolation=true`, bound to `validate`; JaCoCo 0.8.13 `check` rule `LINE COVEREDRATIO 0.80` for the packages in Global Constraints. `application.yml`: `spring.threads.virtual.enabled=true`, `server.shutdown=graceful`, actuator exposes `health,info,prometheus`. Generate wrapper with `mvn -N wrapper:wrapper -Dmaven=3.9.9`.
+`pom.xml`: parent `spring-boot-starter-parent:3.5.6`, `java.version=21`, dependencies listed in Tech Stack; Spotless with `googleJavaFormat 1.28.0`; `maven-checkstyle-plugin` 3.6.0 with Checkstyle 10.26.1, `config/checkstyle/google_checks.xml`, `violationSeverity=warning`, `failOnViolation=true`, bound to `validate`; `maven-failsafe-plugin` (managed version) for `*IT`; JaCoCo 0.8.13 executions as in Interfaces (gates start enforcing from Task 2; in Task 1 set `haltOnFailure=false` and flip it to `true` in Task 2's commit). `application.yml`: `spring.threads.virtual.enabled=true`, `server.shutdown=graceful`, actuator exposes `health,info,prometheus`. Generate wrapper with `mvn -N wrapper:wrapper -Dmaven=3.9.9`.
 
 - [ ] **Step 4: Run to verify pass**
 
 Run: `./mvnw verify`
-Expected: BUILD SUCCESS, 3 tests passing (Docker must be running).
+Expected: BUILD SUCCESS — Surefire runs `ArchitectureTest` (3 rules), Failsafe runs `ApplicationStartsIT` (Docker must be running); `target/jacoco-unit.exec` and `target/jacoco-it.exec` both exist.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add pom.xml mvnw .mvn config src
+git add pom.xml mvnw .mvn config scripts src
 git commit -m "build: scaffold Spring Boot service with quality gates and Testcontainers harness"
 ```
 
@@ -152,14 +161,14 @@ git commit -m "build: scaffold Spring Boot service with quality gates and Testco
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `./mvnw -q test -Dtest=ReservationConstraintIT`
+Run: `./scripts/it.sh 'ReservationConstraintIT'`
 Expected: FAIL (relation `resource_reservation` does not exist).
 
 - [ ] **Step 3: Write `V1__schema.sql` and `V2__seed.sql`** per Interfaces.
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `./mvnw -q test -Dtest=ReservationConstraintIT`
+Run: `./scripts/it.sh 'ReservationConstraintIT'`
 Expected: 5 tests PASS.
 
 - [ ] **Step 5: Commit**
@@ -200,9 +209,12 @@ git commit -m "feat(db): schema with EXCLUDE no_double_booking constraint and se
 - `titleIsFixedPerCode` ⇒ for every `ProblemCodes` entry, `ApiExceptionHandler` renders the exact `title` from spec §14.6.
 - `staffGuardRejectsForeignDealership` ⇒ 403 `FORBIDDEN`.
 
+
+Unit tests: `IdentityHeaderFilterTest` (unit, `MockHttpServletRequest` + mocked `FilterChain`): missing/malformed/unknown-role ⇒ 401 written and chain not called; valid customer and dispatcher headers ⇒ `CallerContext` attribute set; comma-separated dealership ids with spaces parsed; `/actuator/health` skipped. `DealershipAccessTest`: staff with id ⇒ ok; customer ⇒ `ForbiddenException`; dispatcher without id ⇒ `ForbiddenException`. `ApiExceptionHandlerTest` (call handler methods directly): every `ApiException` subclass ⇒ expected status, `code`, `title` (§14.6) and extras; `MethodArgumentNotValidException` ⇒ `errors[]`. `MdcFilterTest`: request id propagated or generated, MDC cleared after the chain.
+
 - [ ] **Step 2: Run to verify failure**
 
-Run: `./mvnw -q test -Dtest='IdentityHeaderFilterIT,ApiExceptionHandlerIT'`
+Run: `./mvnw -q test -Dtest='IdentityHeaderFilterTest,DealershipAccessTest,ApiExceptionHandlerTest,MdcFilterTest' && ./scripts/it.sh 'IdentityHeaderFilterIT,ApiExceptionHandlerIT'`
 Expected: FAIL (classes missing).
 
 - [ ] **Step 3: Implement** filter (skip `/actuator/**`, `/v3/api-docs/**`, `/swagger-ui/**`), resolver, guard, handler (`@RestControllerAdvice` producing `ProblemDetail`; map `MethodArgumentNotValidException`, `ConstraintViolationException`, `MethodArgumentTypeMismatchException`, `HttpMessageNotReadableException` ⇒ 400).
@@ -230,7 +242,10 @@ Expected: FAIL (classes missing).
 `RoutingDataSourceIT`: a test bean with `@Transactional(readOnly=true) DataSourceRole roleInReadOnly()` returns `REPLICA`; `@Transactional DataSourceRole roleInWrite()` returns `PRIMARY`; `@PrimaryRead DataSourceRole roleInPrimaryRead()` returns `PRIMARY`.
 `DbClockIT`: `nowIsCloseToDatabaseTime` — `|DbClock.now() − Instant.now()| < 5s`.
 
-- [ ] **Step 2: Run to verify failure** — `./mvnw -q test -Dtest='RoutingDataSourceIT,DbClockIT'` ⇒ FAIL.
+
+Unit tests: `RoutingDataSourceTest` (unit): `determineCurrentLookupKey()` returns `REPLICA` when `TransactionSynchronizationManager.setCurrentTransactionReadOnly(true)` and `PRIMARY` otherwise.
+
+- [ ] **Step 2: Run to verify failure** — `./mvnw -q test -Dtest=RoutingDataSourceTest && ./scripts/it.sh 'RoutingDataSourceIT,DbClockIT'` ⇒ FAIL.
 
 - [ ] **Step 3: Implement** per Interfaces.
 
@@ -257,7 +272,10 @@ Expected: FAIL (classes missing).
 `CatalogApiIT`: `listsSeededDealerships` (3 items, `RIVERSIDE` has `timeZone=Europe/London`); `servicesForRiverside` (3 items incl. `OIL_CHANGE` 45); `unknownDealershipIs404`; `dispatcherCanReadServices` (dispatcher headers for `HUDSON` reading `RIVERSIDE` services ⇒ 200 — shared read, no guard).
 `CatalogServiceIT`: `secondCallServedFromRedis` (after first `get`, key `catalog:{id}` exists with TTL ≤ 600 s); `redisDownFallsBackToDatabase` (point the Redis connection factory at a stopped container or use a `RedisTemplate` stub that throws ⇒ `get` still returns the catalog).
 
-- [ ] **Step 2: Run to verify failure** — `./mvnw -q test -Dtest='Catalog*'` ⇒ FAIL.
+
+Unit tests: `CatalogServiceTest` (unit, mocked `CatalogRepository` and `RedisTemplate`): cache hit ⇒ repository not called; miss ⇒ loaded and stored with TTL 600 s; Redis throws ⇒ repository result returned and `scheduler_cache_errors_total{cache="catalog"}` incremented (`SimpleMeterRegistry`); unknown id ⇒ `NotFoundException`.
+
+- [ ] **Step 2: Run to verify failure** — `./mvnw -q test -Dtest='Catalog*Test' && ./scripts/it.sh 'Catalog*IT'` ⇒ FAIL.
 - [ ] **Step 3: Implement** per Interfaces.
 - [ ] **Step 4: Run to verify pass** ⇒ PASS.
 - [ ] **Step 5: Commit** — `git commit -m "feat(catalog): dealership/service catalog API with Redis cache-aside"`
@@ -282,7 +300,10 @@ Expected: FAIL (classes missing).
 `MeVehicleApiIT`: `aliceListsOnlyHerVehicles` (sees `ALICE_FOCUS`, not `BOB_GOLF`); `newUserGetsProfileOnFirstCall` (random sub ⇒ `GET` returns `{items: []}`, a `customer` row now exists with that `idp_subject`); `addVehicleValidatesVin` (VIN 16 chars ⇒ 400 with `errors[0].field=="vin"`); `duplicateVinIs409VehicleAlreadyExists`; `dispatcherRoleCannotUseMeEndpoints` ⇒ 403.
 `DispatcherCustomerApiIT`: `searchRequiresThreeChars` ⇒ 400; `searchFindsByRegistrationPrefix`; `createWalkInCustomerWithoutLogin` (201, `idp_subject` NULL in DB); `foreignDealershipIs403`; `customerRoleIs403`.
 
-- [ ] **Step 2–4:** run `./mvnw -q test -Dtest='*CustomerApiIT,MeVehicleApiIT'` fail → implement → pass.
+
+Unit tests: `CustomerServiceTest` (unit, mocked repositories): existing `idp_subject` ⇒ id returned without insert; unknown ⇒ insert then select; vehicle not owned ⇒ `NotFoundException`; duplicate-key from repository ⇒ `ApiException` code `VEHICLE_ALREADY_EXISTS`; search `q` shorter than 3 ⇒ `ValidationException`. `VehicleRequestValidationTest` (Bean Validation `Validator`): VIN length/charset (I, O, Q rejected), `modelYear` bounds, negative mileage.
+
+- [ ] **Step 2–4:** run `./mvnw -q test -Dtest='CustomerServiceTest,VehicleRequestValidationTest' && ./scripts/it.sh '*CustomerApiIT,MeVehicleApiIT'` fail → implement → pass.
 - [ ] **Step 5: Commit** — `git commit -m "feat(customer): self-service vehicles and dispatcher walk-in customers"`
 
 ---
@@ -336,7 +357,10 @@ Expected: FAIL (classes missing).
 `AvailabilityCalculatorTest`: `emptyDayOffersEveryQuarterHourThatFits` (Riverside Monday, 120 min ⇒ first `08:00`, last `16:00`, 33 starts); `fullyBookedSoloDayOffersNothing`; `slotFreedWhenReservationInactive`; `earliestCutsMorning`; `springForwardGapNeverOffered` (**Review Focus 5**); `alternativesAreNearestFiveAfterRequested`.
 `AvailabilityApiIT`: `returnsStartsInUtc` (every start ends with `Z`; July Riverside first start is `07:00Z` = 08:00 BST); `closedDayReturnsEmptyStarts` (**Review Focus 2**: Sunday ⇒ `starts == []`, 200); `rangeOverFourteenDaysIs400`, `fromAfterToIs400`, `badServiceIdIs400` (**Review Focus 3**); `responseHasNoResourceNames` (body contains no technician `displayName`).
 
-- [ ] **Step 2–4:** `./mvnw -q test -Dtest='AllocationServiceTest,AvailabilityCalculatorTest,AvailabilityApiIT'` fail → implement → pass.
+
+Unit tests: `AvailabilityServiceTest` (unit, mocked `OccupancySource`, `CatalogService`, `DbClock`): customer earliest = now + 2 h, dispatcher earliest = now − 15 min; `from > to` and range > 14 days ⇒ `ValidationException`; one `forDay` call per date in range.
+
+- [ ] **Step 2–4:** `./mvnw -q test -Dtest='AllocationServiceTest,AvailabilityCalculatorTest,AvailabilityServiceTest' && ./scripts/it.sh 'AvailabilityApiIT'` fail → implement → pass.
 - [ ] **Step 5: Commit** — `git commit -m "feat(availability): allocation ranking and availability API"`
 
 ---
@@ -363,9 +387,12 @@ Expected: FAIL (classes missing).
 `BookingConcurrencyIT` (SOLO, 50 threads via `ExecutorService` + `CountDownLatch` start gate, distinct idempotency keys and customers): `fiftyRequestsSameStartExactlyOneWins` ⇒ exactly one 201, 49 × 409; `mixedOverlappingDurationsNeverOverlap` (random starts 09:00–12:00 in 15-min steps, mixed 45/75 min) ⇒ afterwards SQL `SELECT count(*) FROM resource_reservation a JOIN resource_reservation b ON a.resource_id=b.resource_id AND a.id<b.id AND a.active AND b.active AND a.period && b.period` = 0.
 `IdempotencyIT`: `retryReturnsSameAppointment` (same key + body twice ⇒ both 201, same `id`, second has `Idempotency-Replayed: true`, 1 row); `sameKeyDifferentBody422`; `parallelDuplicatesCreateOneAppointment` (10 threads same key ⇒ 1 appointment; every response 201 with same id or 409 `REQUEST_IN_PROGRESS` with `Retry-After: 1`).
 
-- [ ] **Step 2: Run to verify failure** — `./mvnw -q test -Dtest='BookingApiIT,BookingConcurrencyIT,IdempotencyIT'` ⇒ FAIL.
+
+Unit tests: `BookingServiceTest` (unit, all collaborators mocked, `TransactionTemplate` executing inline): first pair succeeds ⇒ one insert, listener called once after commit; `23P01` on pair 1 ⇒ pair 2 tried without the conflicting resource; three `23P01` ⇒ `SlotUnavailableException` with alternatives and no listener call; no candidates ⇒ `SlotUnavailableException` without any insert; `40P01` once ⇒ retried and succeeds, twice ⇒ propagated; idempotent replay ⇒ stored response returned, allocation never called; policy violation ⇒ no repository interaction. `RequestHashTest`: same request with fields in different order ⇒ same SHA-256; different `start` ⇒ different hash. `AppointmentViewMapperTest`: UTC `Z` output, services ordered by `position`.
+
+- [ ] **Step 2: Run to verify failure** — `./mvnw -q test -Dtest='BookingServiceTest,RequestHashTest,AppointmentViewMapperTest' && ./scripts/it.sh 'BookingApiIT,BookingConcurrencyIT,IdempotencyIT'` ⇒ FAIL.
 - [ ] **Step 3: Implement** per Interfaces.
-- [ ] **Step 4: Run to verify pass** ⇒ PASS (run the concurrency class 3× to check stability: `./mvnw -q test -Dtest=BookingConcurrencyIT -Dsurefire.rerunFailingTestsCount=0` three times).
+- [ ] **Step 4: Run to verify pass** ⇒ PASS (run the concurrency class 3× to check stability: `./scripts/it.sh BookingConcurrencyIT` three times).
 - [ ] **Step 5: Commit** — `git commit -m "feat(booking): direct booking with EXCLUDE-backed allocation, idempotency and outbox"`
 
 ---
@@ -394,7 +421,10 @@ Expected: FAIL (classes missing).
 `HoldConcurrencyIT`: `fiftyHoldsSameSlotExactlyOneGranted` (SOLO ⇒ one 201, 49 × 409).
 `LedgerFailureIT`: `flushedLedgerStillPreventsDoubleBooking` (book via hold, `FLUSHALL`, second user requests a hold on the same slot ⇒ ledger is rebuilt from the primary, shows the slot taken ⇒ 409; DB still has exactly one appointment); `staleLedgerHealsOnConflict` (insert a conflicting reservation directly in DB without touching Redis ⇒ hold granted ⇒ confirm 409 ⇒ `ledger-loaded` key deleted ⇒ next availability excludes the slot); `redisDownHoldsReturn503AndDirectBookingWorks` (stop Redis container in a dedicated test with its own container ⇒ `/me/holds` 503 `HOLDS_UNAVAILABLE` with `Retry-After: 30`, `POST /me/appointments` without `holdId` ⇒ 201).
 
-- [ ] **Step 2–4:** `./mvnw -q test -Dtest='Hold*IT,LedgerFailureIT'` fail → implement → pass.
+
+Unit tests: `HoldServiceTest` (unit, mocked `SlotLedger`, `AllocationService`, `CatalogService`): granted ⇒ `HoldView` with `expiresAt`; empty ⇒ `SlotUnavailableException` with alternatives from ledger occupancy; `RedisConnectionFailureException` ⇒ `HoldsUnavailableException`; validation failure ⇒ ledger never called. `BookingServiceHoldPathTest`: hold of another user ⇒ `NotFoundException`; different start/services ⇒ `HOLD_MISMATCH`; expired hold ⇒ falls back to ranked pairs. `LedgerKeysTest`: all keys for one dealership-day share the same `{…}` hash tag; `holdref` key has none.
+
+- [ ] **Step 2–4:** `./mvnw -q test -Dtest='HoldServiceTest,BookingServiceHoldPathTest,LedgerKeysTest' && ./scripts/it.sh 'Hold*IT,LedgerFailureIT'` fail → implement → pass.
 - [ ] **Step 5: Commit** — `git commit -m "feat(hold): Redis slot ledger with atomic Lua holds; DB remains final authority"`
 
 ---
@@ -416,7 +446,10 @@ Expected: FAIL (classes missing).
 `MyAppointmentsApiIT`: `listShowsOnlyMine`; `getOthersIs404`; `justBookedVisibleImmediately` (book then list in the same test ⇒ present — exercises primary read); `paginationCursorWorks` (25 appointments, limit 10 ⇒ 3 pages, no duplicates, last `nextCursor` null); `limitOver100Is400`.
 `CustomerChangeApiIT`: `rescheduleMovesBothReservations` (new period on both rows, version 1, outbox `AppointmentRescheduled` aggregateVersion 1, old slot free in availability); `rescheduleStaleVersion412`; `rescheduleWithoutIfMatch428`; `rescheduleWithin24hIs422`; `cancelFreesSlot` (status CANCELLED, reservations inactive, slot bookable by Bob); `cancelTwiceIs409InvalidTransition`; `cancelOthersIs404`.
 
-- [ ] **Step 2–4:** `./mvnw -q test -Dtest='MyAppointmentsApiIT,CustomerChangeApiIT'` fail → implement → pass.
+
+Unit tests: `RescheduleServiceTest` and `CustomerCancelServiceTest` (unit, mocked repositories/ledger/outbox): 0 rows updated + appointment exists ⇒ 412, + not owned ⇒ 404; outbox event carries new `aggregateVersion`; ledger updated only after commit. `CursorCodecTest`: encode/decode round-trip, tampered cursor ⇒ `ValidationException`.
+
+- [ ] **Step 2–4:** `./mvnw -q test -Dtest='RescheduleServiceTest,CustomerCancelServiceTest,CursorCodecTest' && ./scripts/it.sh 'MyAppointmentsApiIT,CustomerChangeApiIT'` fail → implement → pass.
 - [ ] **Step 5: Commit** — `git commit -m "feat(appointments): customer list, reschedule via hold, cancel"`
 
 ---
@@ -443,7 +476,10 @@ Expected: FAIL (classes missing).
 `TransitionApiIT`: `fullHappyPath` (CHECK_IN → START → HOLD(PARTS) → RESUME → COMPLETE); `holdFreesTechnicianKeepsBay` (after HOLD, another job can be booked on that technician from now, but not on that bay); `holdWithReleaseBayFreesBoth`; `holdWithoutReasonIs400`; `resumeReservesRemainingMinutes` (75-min job, 30 worked, resume at T ⇒ technician reservation `[T, T+45m)`); `resumeOntoBusyTechnician409`; `dragOnHoldJobIs409InvalidTransition`; `completeEarlyReleasesRemainder` (slot after `now` bookable); `checkInVsCancelRaceOneWins` (concurrent ⇒ exactly one 200); `noShowBeforeGrace422`; `invalidTransition409` (detail names current status, e.g. "Cannot start an appointment that is BOOKED; check it in first."); `actionWithStaleIfMatch412`.
 `BlockApiIT`: `blockPreventsBooking` (customer availability excludes blocked range; booking ⇒ 409); `blockOverAppointment409ListsConflicts`; `removeBlockFreesTime`; `deleteUnknownBlock404`.
 
-- [ ] **Step 2–4:** `./mvnw -q test -Dtest='AppointmentStateMachineTest,ScheduleApiIT,DispatcherChangeApiIT,TransitionApiIT,BlockApiIT'` fail → implement → pass.
+
+Unit tests: `TransitionServiceTest` (unit, mocked repositories, fixed `DbClock`): HOLD adds the stint to `worked_minutes` and ends only the technician reservation unless `releaseBay`; RESUME computes remaining = planned − worked (75 − 30 = 45; floor 5) and new periods incl. bay buffer; COMPLETE early ends both reservations at now; NO_SHOW before grace ⇒ `NO_SHOW_TOO_EARLY`; stale `expectedVersion` ⇒ 412. `DispatcherChangeServiceTest`: overlap with another user's hold ⇒ `SlotHeldException`, with `overrideHold` ⇒ holds released; `IN_PROGRESS` start change ⇒ `START_FIXED`; `ON_HOLD` ⇒ `INVALID_TRANSITION`. `BlockServiceTest`: reason required ≤ 200; end ≤ start ⇒ `ValidationException`. `ScheduleViewMapperTest`: `overrun` true only for `IN_PROGRESS` past `end_at`; ON_HOLD items expose `remainingMinutes` and `technicianId = null`.
+
+- [ ] **Step 2–4:** `./mvnw -q test -Dtest='AppointmentStateMachineTest,TransitionServiceTest,DispatcherChangeServiceTest,BlockServiceTest,ScheduleViewMapperTest' && ./scripts/it.sh 'ScheduleApiIT,DispatcherChangeApiIT,TransitionApiIT,BlockApiIT'` fail → implement → pass.
 - [ ] **Step 5: Commit** — `git commit -m "feat(dispatcher): Gantt schedule, drag-and-drop with If-Match, transitions, blocks"`
 
 ---
@@ -466,7 +502,10 @@ Expected: FAIL (classes missing).
 `OutboxRelayIT`: `publishesInOrderAndMarksPublished` (3 events ⇒ captured by a test `EventPublisher` bean in order, all `published_at` set); `failureLeavesEventForRetry` (publisher throws on 2nd ⇒ 1 published, 2 pending; next call publishes them); `twoRelaysNeverPublishTwice` (two threads call `publishBatch` concurrently on 200 events ⇒ 200 distinct ids published once each); `envelopeCarriesAggregateVersion`.
 `HousekeepingJobsIT`: `archivesOnlyOldReservations`; `expiresOldIdempotencyKeys`; `purgesOnlyPublishedOutboxOlderThanSevenDays`.
 
-- [ ] **Step 2–4:** `./mvnw -q test -Dtest='OutboxRelayIT,HousekeepingJobsIT'` fail → implement → pass.
+
+Unit tests: `OutboxRelayTest` (unit, mocked repository + `EventPublisher`): publishes in `occurred_at` order and marks each published; failure on event 2 ⇒ event 1 marked, 2 and 3 not; empty batch ⇒ no publisher call; backlog gauge updated. `EventEnvelopeTest`: JSON shape matches §10.2 (`aggregateVersion`, `source = scheduler/<region>`). `LoggingEventPublisherTest`: one INFO line on logger `scheduler.events` with the structured fields.
+
+- [ ] **Step 2–4:** `./mvnw -q test -Dtest='OutboxRelayTest,EventEnvelopeTest,LoggingEventPublisherTest' && ./scripts/it.sh 'OutboxRelayIT,HousekeepingJobsIT'` fail → implement → pass.
 - [ ] **Step 5: Commit** — `git commit -m "feat(outbox): SKIP LOCKED relay with logging publisher; housekeeping jobs"`
 
 ---
@@ -487,7 +526,10 @@ Expected: FAIL (classes missing).
 `MetricsIT`: after one successful and one conflicting booking, `/actuator/prometheus` contains `scheduler_booking_attempts_total{outcome="created"} 1.0` and `{outcome="conflict"} 1.0`.
 `JsonLogIT`: capture stdout (`OutputCaptureExtension`) during a booking ⇒ a JSON line with `message == "event published"`… (after relay tick) and every captured line parses as JSON and contains no `@` email and no VIN of the fixture vehicle.
 
-- [ ] **Step 2–4:** `./mvnw -q test -Dtest='MetricsIT,JsonLogIT'` fail → implement → pass.
+
+Unit tests: `BookingMetricsTest` (unit, `SimpleMeterRegistry`): each outcome increments the right tagged counter; availability timer records.
+
+- [ ] **Step 2–4:** `./mvnw -q test -Dtest=BookingMetricsTest && ./scripts/it.sh 'MetricsIT,JsonLogIT'` fail → implement → pass.
 - [ ] **Step 5: Commit** — `git commit -m "feat(observability): structured JSON logs and booking metrics"`
 
 ---
@@ -523,9 +565,9 @@ Expected: FAIL (classes missing).
 - Produces: `README.md` sections: Overview & scope (backend only, design-only parts), Architecture (link to design doc + `docs/diagrams/02-regional.png`), Prerequisites (JDK 21, Docker), Build & test (`./mvnw verify`), Run locally (`docker compose up --build`, `./scripts/smoke.sh`, OpenSearch Dashboards URL), API usage (identity headers explained as gateway stand-ins, link to `examples.http` and `openapi.yaml`), Quality & security (`./mvnw verify`, `./scripts/security.sh`), Load test, Design decisions summary, **AI Collaboration Narrative** (strategy, verification process, quality assurance — sourced from `docs/ai-collaboration/decision-log.md`), Known limitations (§12.4 cross-region, design-only components).
 
 - [ ] **Step 1: Write the failing tests** — `OpenApiContractIT.committedSpecMatchesGenerated`; `OpenApiContractIT.operationsMatchSpecSection14` (the generated document has exactly the 31 method+path pairs of spec §14.2–14.4, and every non-GET operation documents its `problem+json` responses).
-- [ ] **Step 2: Run to verify failure** — `./mvnw -q test -Dtest=OpenApiContractIT` ⇒ FAIL (file missing).
-- [ ] **Step 3: Implement** annotations; generate spec with `./mvnw -q test -Dtest=OpenApiContractIT -Dopenapi.write=true`; write scripts and README.
-- [ ] **Step 4: Verify** — `./mvnw verify` ⇒ BUILD SUCCESS (all tests, Spotless, Checkstyle, JaCoCo ≥ 0.80, ArchUnit); `./scripts/security.sh` runs (Snyk part may be skipped with the printed hint if not installed).
+- [ ] **Step 2: Run to verify failure** — `./scripts/it.sh 'OpenApiContractIT'` ⇒ FAIL (file missing).
+- [ ] **Step 3: Implement** annotations; generate spec with `./mvnw -q verify -DskipUTs=true -Dit.test=OpenApiContractIT -Djacoco.skip=true -Dopenapi.write=true`; write scripts and README.
+- [ ] **Step 4: Verify** — `./mvnw verify` ⇒ BUILD SUCCESS (all tests, Spotless, Checkstyle, unit coverage ≥ 90 % line / 80 % branch, overall ≥ 90 % line, ArchUnit); open `target/site/jacoco-merged/index.html` and record both coverage numbers in the README; `./scripts/security.sh` runs (Snyk part may be skipped with the printed hint if not installed).
 - [ ] **Step 5: Commit** — `git commit -m "docs: OpenAPI contract, examples, security and load scripts, README with AI narrative"`
 
 ---

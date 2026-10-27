@@ -133,6 +133,8 @@ so consumers ignore stale ones. Payloads carry IDs, not personal data.
 | Redis | Cluster mode; all keys of one dealership-day sit in one slot |
 | Data growth | Reservations archived after 30 days, outbox purged after 7; appointments partition-ready by month |
 
+**Quality gates:** unit tests ≥ 90 % line coverage on their own, plus integration tests against real PostgreSQL and Redis (Testcontainers) — merged coverage ≥ 90 %; Checkstyle, Spotless, ArchUnit, Snyk / OWASP scans.
+
 Locally everything runs with one `docker compose up`: app, PostgreSQL primary + replica,
 Redis, Fluent Bit, OpenSearch + Dashboards.
 
