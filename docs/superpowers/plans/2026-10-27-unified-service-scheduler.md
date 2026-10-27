@@ -8,7 +8,7 @@
 
 **Tech Stack:** Java 21, Spring Boot 3.5.6 (web, jdbc, data-redis, validation, actuator), PostgreSQL 16, Redis 7, Flyway, springdoc-openapi 2.8.13, logstash-logback-encoder 8.1, uuid-creator 6.1.1 (UUIDv7), JUnit 5, AssertJ, Testcontainers 1.21.3, RestAssured, ArchUnit 1.4.1, Maven (wrapper 3.9.9), Spotless (google-java-format 1.28.0), Checkstyle 10.26.1, JaCoCo 0.8.13, OWASP Dependency-Check 12.1.3, Docker Compose.
 
-**Spec:** `docs/superpowers/specs/2026-10-27-unified-service-scheduler-design.md` — section numbers below (§n) refer to it.
+**Spec:** `docs/system-design/02-detailed-design.md` (overview: `docs/system-design/01-high-level-design.md`) — section numbers below (§n) refer to it.
 
 ## Global Constraints
 

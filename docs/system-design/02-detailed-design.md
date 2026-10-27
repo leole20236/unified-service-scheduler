@@ -1,12 +1,13 @@
-# Unified Service Scheduler — System Design Document
+# Unified Service Scheduler — Detailed System Design
 
 | | |
 |---|---|
 | **Scenario** | Keyloop Technical Assessment — Scenario A: The Unified Service Scheduler |
-| **Status** | Draft for approval |
-| **Date** | 2026-10-27 |
+| **Status** | Approved |
+| **Date** | 2026-10-28 |
 | **Implemented layer** | Backend (REST API + PostgreSQL + Redis). Everything else is design-only. |
-| **Companion** | [`docs/ai-collaboration/decision-log.md`](../../ai-collaboration/decision-log.md) — every decision below, with the debate that produced it |
+| **Overview** | [`01-high-level-design.md`](01-high-level-design.md) — decisions and flows on a few pages; this document is the full reference |
+| **Companion** | [`docs/ai-collaboration/decision-log.md`](../ai-collaboration/decision-log.md) — every decision below, with the debate that produced it |
 
 ---
 
@@ -94,9 +95,9 @@ Keyloop reports ~20,000 dealer sites in 100+ countries; one dealer group (Wilson
 
 ### 5.1 Global view
 
-![Global architecture](../../diagrams/01-global.png)
+![Global architecture](../diagrams/01-global.png)
 
-<sub>Source: [`docs/diagrams/01-global.mmd`](../../diagrams/01-global.mmd)</sub>
+<sub>Source: [`docs/diagrams/01-global.mmd`](../diagrams/01-global.mmd)</sub>
 
 Each region is a **fully independent stack** — its own gateway, scheduler pods, PostgreSQL
 cluster (primary + replicas) and Redis. Regions share no data and never talk to each other
@@ -106,9 +107,9 @@ global load balancer routes each request to that region.
 
 ### 5.2 Regional view (the part we implement is the Scheduler Service)
 
-![Regional architecture](../../diagrams/02-regional.png)
+![Regional architecture](../diagrams/02-regional.png)
 
-<sub>Source: [`docs/diagrams/02-regional.mmd`](../../diagrams/02-regional.mmd)</sub>
+<sub>Source: [`docs/diagrams/02-regional.mmd`](../diagrams/02-regional.mmd)</sub>
 
 ### 5.3 Components
 
@@ -129,17 +130,17 @@ global load balancer routes each request to that region.
 
 ### 5.4 Inside the Scheduler Service (block diagram)
 
-![Scheduler service internal blocks](../../diagrams/06-service-blocks.png)
+![Scheduler service internal blocks](../diagrams/06-service-blocks.png)
 
-<sub>Source: [`docs/diagrams/06-service-blocks.mmd`](../../diagrams/06-service-blocks.mmd)</sub>
+<sub>Source: [`docs/diagrams/06-service-blocks.mmd`](../diagrams/06-service-blocks.mmd)</sub>
 
 ## 6. Domain model and business rules
 
 ### 6.1 Entities
 
-![Entity relationship diagram](../../diagrams/03-erd.png)
+![Entity relationship diagram](../diagrams/03-erd.png)
 
-<sub>Source: [`docs/diagrams/03-erd.mmd`](../../diagrams/03-erd.mmd)</sub>
+<sub>Source: [`docs/diagrams/03-erd.mmd`](../diagrams/03-erd.mmd)</sub>
 
 - **Dealership** — `zoneId` (IANA, e.g. `Europe/London`), `homeRegion`, `bayBufferMinutes`.
 - **ServiceType** — global catalog: `code`, `name`, `durationMinutes`, `requiredSkill`.
@@ -157,9 +158,9 @@ global load balancer routes each request to that region.
 
 ### 6.2 Appointment lifecycle
 
-![Appointment lifecycle](../../diagrams/04-lifecycle.png)
+![Appointment lifecycle](../diagrams/04-lifecycle.png)
 
-<sub>Source: [`docs/diagrams/04-lifecycle.mmd`](../../diagrams/04-lifecycle.mmd)</sub>
+<sub>Source: [`docs/diagrams/04-lifecycle.mmd`](../diagrams/04-lifecycle.mmd)</sub>
 
 | Transition | Effect on reservations |
 |---|---|
@@ -545,9 +546,9 @@ REQUEST_IN_PROGRESS` if the first rolled back mid-flight and the client should r
 
 ### 8.6 Slot holds in Redis (airline-style)
 
-![Booking sequence: hold then confirm](../../diagrams/07-booking-sequence.png)
+![Booking sequence: hold then confirm](../diagrams/07-booking-sequence.png)
 
-<sub>Source: [`docs/diagrams/07-booking-sequence.mmd`](../../diagrams/07-booking-sequence.mmd)</sub>
+<sub>Source: [`docs/diagrams/07-booking-sequence.mmd`](../diagrams/07-booking-sequence.mmd)</sub>
 
 Two jobs: **UX** — the slot the customer picked is theirs for 10 minutes while they review;
 **contention shield** — competing requests for a hot slot are rejected in Redis in ~1 ms and
@@ -624,9 +625,9 @@ performance.
 
 ### 9.1 Split
 
-![CQRS write and read paths](../../diagrams/08-cqrs-paths.png)
+![CQRS write and read paths](../diagrams/08-cqrs-paths.png)
 
-<sub>Source: [`docs/diagrams/08-cqrs-paths.mmd`](../../diagrams/08-cqrs-paths.mmd)</sub>
+<sub>Source: [`docs/diagrams/08-cqrs-paths.mmd`](../diagrams/08-cqrs-paths.mmd)</sub>
 
 - **Command side** (`…command` package): booking, reschedule, transitions, blocks. Uses the
   **primary** `DataSource`. Owns all writes and the outbox.
@@ -678,9 +679,9 @@ authority.
 
 ### 10.1 Flow
 
-![Outbox event flow to Kafka or SNS/SQS](../../diagrams/09-event-flow.png)
+![Outbox event flow to Kafka or SNS/SQS](../diagrams/09-event-flow.png)
 
-<sub>Source: [`docs/diagrams/09-event-flow.mmd`](../../diagrams/09-event-flow.mmd)</sub>
+<sub>Source: [`docs/diagrams/09-event-flow.mmd`](../diagrams/09-event-flow.mmd)</sub>
 
 1. The command transaction inserts an `outbox_event` row alongside the state change ⇒ the
    event exists **if and only if** the change committed.
@@ -847,9 +848,9 @@ forward mismatched requests to the dealership's region, plus a fan-out for
 
 ## 13. Scaling and deployment
 
-![Scaling and deployment](../../diagrams/05-scaling.png)
+![Scaling and deployment](../diagrams/05-scaling.png)
 
-<sub>Source: [`docs/diagrams/05-scaling.mmd`](../../diagrams/05-scaling.mmd)</sub>
+<sub>Source: [`docs/diagrams/05-scaling.mmd`](../diagrams/05-scaling.mmd)</sub>
 
 | Layer | Scaling rule |
 |---|---|
@@ -1083,13 +1084,13 @@ browser if the HTML changes.
 
 ### 15.1 B2C booking flow (mirrors Keyloop / Xtime: vehicle → services → time → confirm)
 
-![B2C booking flow](../../diagrams/ui-01-customer-booking.png)
+![B2C booking flow](../diagrams/ui-01-customer-booking.png)
 
 Tapping a time calls `POST /me/holds`; the review screen shows the 10-minute hold countdown
 and confirms with `POST /me/appointments` + `holdId`. Closed days are shown but disabled;
 times taken by other customers' holds simply don't appear.
 
-![B2C states: conflict, confirmation, my appointments](../../diagrams/ui-02-customer-states.png)
+![B2C states: conflict, confirmation, my appointments](../diagrams/ui-02-customer-states.png)
 
 - **409 `SLOT_UNAVAILABLE`** becomes a bottom sheet with the `alternatives[]`; one tap holds
   the new time.
@@ -1098,9 +1099,9 @@ times taken by other customers' holds simply don't appear.
 
 ### 15.2 Dispatcher Gantt board
 
-![Dispatcher board](../../diagrams/ui-03-dispatcher-board.png)
+![Dispatcher board](../diagrams/ui-03-dispatcher-board.png)
 
-![Dispatcher dialogs: walk-in booking, put on hold, resume](../../diagrams/ui-04-dispatcher-dialogs.png)
+![Dispatcher dialogs: walk-in booking, put on hold, resume](../diagrams/ui-04-dispatcher-dialogs.png)
 
 Interactions → API:
 
@@ -1193,9 +1194,9 @@ or lag > 30 s, replica lag > 2 s, Redis circuit open.
 docker compose up --build
 ```
 
-![Local Docker Compose stack](../../diagrams/10-local-docker.png)
+![Local Docker Compose stack](../diagrams/10-local-docker.png)
 
-<sub>Source: [`docs/diagrams/10-local-docker.mmd`](../../diagrams/10-local-docker.mmd)</sub>
+<sub>Source: [`docs/diagrams/10-local-docker.mmd`](../diagrams/10-local-docker.mmd)</sub>
 
 | Service | Image (pinned in compose) | Port |
 |---|---|---|
