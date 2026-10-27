@@ -5,6 +5,10 @@ import static com.keyloop.scheduler.support.Fixtures.SEED_VEHICLES;
 import static org.springframework.boot.test.context.SpringBootTest.WebEnvironment.RANDOM_PORT;
 
 import com.keyloop.scheduler.SchedulerApplication;
+import io.lettuce.core.RedisClient;
+import io.lettuce.core.RedisURI;
+import io.lettuce.core.api.StatefulRedisConnection;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
@@ -12,7 +16,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
-import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -32,16 +35,32 @@ public abstract class IntegrationTest {
   private static final GenericContainer<?> REDIS =
       new GenericContainer<>("redis:7.4.1-alpine").withExposedPorts(6379);
 
+  /** Harness-owned Redis connection with a generous timeout (the app's 100 ms stays untouched). */
+  private static final StatefulRedisConnection<String, String> CLEANUP_REDIS;
+
   static {
     POSTGRES.start();
     REDIS.start();
+    RedisClient client =
+        RedisClient.create(
+            RedisURI.builder()
+                .withHost(REDIS.getHost())
+                .withPort(REDIS.getMappedPort(6379))
+                .withTimeout(Duration.ofSeconds(2))
+                .build());
+    CLEANUP_REDIS = client.connect();
+    Runtime.getRuntime()
+        .addShutdownHook(
+            new Thread(
+                () -> {
+                  CLEANUP_REDIS.close();
+                  client.shutdown();
+                }));
   }
 
   @LocalServerPort protected int port;
 
   @Autowired protected JdbcTemplate jdbc;
-
-  @Autowired private RedisConnectionFactory redisConnectionFactory;
 
   @DynamicPropertySource
   static void containerProperties(DynamicPropertyRegistry registry) {
@@ -77,8 +96,6 @@ public abstract class IntegrationTest {
     }
     deleteExcept("vehicle", SEED_VEHICLES);
     deleteExcept("customer", SEED_CUSTOMERS);
-    try (var connection = redisConnectionFactory.getConnection()) {
-      connection.serverCommands().flushAll();
-    }
+    CLEANUP_REDIS.sync().flushall();
   }
 }
