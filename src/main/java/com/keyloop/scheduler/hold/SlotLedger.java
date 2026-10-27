@@ -130,8 +130,8 @@ public class SlotLedger {
 
   /**
    * Rebuilds the day from the primary when its marker is missing. Concurrent callers in this JVM
-   * share one rebuild; a rebuild overtaken by a write-through is retried, then given up (the ledger
-   * then stays unmarked and the next request tries again; the database still decides).
+   * share one rebuild; a rebuild overtaken by a write-through is retried, and when every attempt is
+   * overtaken {@link LedgerUnavailableException} is thrown: an unmarked ledger is never used.
    */
   public void ensureLoaded(UUID dealershipId, LocalDate date, TimeRange dayWindow) {
     LedgerKeys keys = LedgerKeys.of(dealershipId, date);
@@ -192,8 +192,12 @@ public class SlotLedger {
         return;
       }
     }
-    LOG.warn(
-        "Ledger {} not marked loaded: overtaken by writes {} times", keys.tag(), LOAD_ATTEMPTS);
+    LOG.info(
+        "Ledger {} not rebuilt: overtaken by writes {} times; not used for this call",
+        keys.tag(),
+        LOAD_ATTEMPTS);
+    throw new LedgerUnavailableException(
+        "Ledger " + keys.tag() + " could not be rebuilt from the primary");
   }
 
   private static List<UUID> resourceIds(ResourceCatalog catalog) {
@@ -242,8 +246,12 @@ public class SlotLedger {
       args.add(pair.bayId().toString());
       args.add(pair.technicianId().toString());
     }
-    List<Object> result =
-        redis.execute(acquire, List.of(keys.userHold(userId), keys.hold(holdId)), args.toArray());
+    Set<String> scriptKeys = new LinkedHashSet<>(List.of(keys.userHold(userId), keys.hold(holdId)));
+    for (ResourcePair pair : rankedPairs) {
+      scriptKeys.add(keys.ledger(pair.bayId()));
+      scriptKeys.add(keys.ledger(pair.technicianId()));
+    }
+    List<Object> result = redis.execute(acquire, List.copyOf(scriptKeys), args.toArray());
     String previous = (String) result.get(4);
     if (!previous.isEmpty()) {
       redis.delete(LedgerKeys.holdRef(UUID.fromString(previous)));
@@ -305,7 +313,9 @@ public class SlotLedger {
     args.add(holdId.toString());
     args.add(Long.toString(ledgerTtl.toMillis()));
     committed.forEach((id, row) -> addConfirmed(args, id, row.resourceId(), row.period()));
-    redis.execute(confirm, List.of(keys.hold(holdId), keys.generation()), args.toArray());
+    Set<String> scriptKeys = new LinkedHashSet<>(List.of(keys.hold(holdId), keys.generation()));
+    committed.values().forEach(row -> scriptKeys.add(keys.ledger(row.resourceId())));
+    redis.execute(confirm, List.copyOf(scriptKeys), args.toArray());
     redis.delete(LedgerKeys.holdRef(holdId));
   }
 
@@ -337,14 +347,16 @@ public class SlotLedger {
     args.add(Integer.toString(removedReservationIds.size()));
     removedReservationIds.forEach(id -> args.add(id.toString()));
     added.forEach((id, row) -> addConfirmed(args, id, row.resourceId(), row.period()));
-    redis.execute(apply, List.of(keys.generation()), args.toArray());
+    Set<String> scriptKeys = new LinkedHashSet<>(List.of(keys.generation()));
+    scan.forEach(id -> scriptKeys.add(keys.ledger(id)));
+    added.values().forEach(row -> scriptKeys.add(keys.ledger(row.resourceId())));
+    redis.execute(apply, List.copyOf(scriptKeys), args.toArray());
   }
 
   /** Forces a rebuild of the day from the primary before its next use (after a 23P01). */
   public void markDirty(UUID dealershipId, LocalDate date) {
     LedgerKeys keys = LedgerKeys.of(dealershipId, date);
-    redis.execute(
-        dirty, List.of(keys.loaded(), keys.generation()), Long.toString(ledgerTtl.toMillis()));
+    redis.execute(dirty, List.of(keys.loaded()));
   }
 
   /**
@@ -389,7 +401,12 @@ public class SlotLedger {
     args.add(keys.tag());
     args.add(viewer == null ? "" : viewer.toString());
     resources.forEach(id -> args.add(id.toString()));
-    List<Object> result = redis.execute(read, List.of(), args.toArray());
+    List<String> scriptKeys = new ArrayList<>(List.of(keys.generation()));
+    if (viewer != null) {
+      scriptKeys.add(keys.userHold(viewer));
+    }
+    resources.forEach(id -> scriptKeys.add(keys.ledger(id)));
+    List<Object> result = redis.execute(read, scriptKeys, args.toArray());
     long now = Long.parseLong((String) result.get(0));
     String own = (String) result.get(1);
     Map<UUID, List<Interval>> out = new HashMap<>();

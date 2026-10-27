@@ -2,7 +2,6 @@ package com.keyloop.scheduler.booking;
 
 import java.util.Collection;
 import java.util.Comparator;
-import java.util.List;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
@@ -25,7 +24,10 @@ import org.springframework.transaction.annotation.Transactional;
 @Component
 public class ResourceLocks {
 
-  /** PostgreSQL's uuid order: unsigned bytes, which equals the order of the lowercase hex text. */
+  /**
+   * PostgreSQL's uuid order (unsigned bytes = order of the lowercase hex text): the order rows are
+   * inserted in.
+   */
   static final Comparator<UUID> UUID_ORDER = Comparator.comparing(UUID::toString);
 
   private final JdbcTemplate jdbc;
@@ -36,20 +38,21 @@ public class ResourceLocks {
   }
 
   /**
-   * Takes {@code pg_advisory_xact_lock} on every distinct resource, in ascending resource-id order
-   * (one global order, so two writers never wait on each other in a cycle). Must run inside the
-   * caller's read-write transaction: outside one the locks would be released immediately.
+   * Takes {@code pg_advisory_xact_lock} once per distinct lock key of the resources, in ascending
+   * key order. Ordering by the key actually locked (not by resource id) keeps one global order even
+   * when two resources share a key, so two writers never wait on each other in a cycle. Must run
+   * inside the caller's read-write transaction: outside one the locks would be released at once.
    */
   @Transactional(propagation = Propagation.MANDATORY)
   public void lockAll(Collection<UUID> resourceIds) {
-    for (UUID id : ordered(resourceIds)) {
-      jdbc.queryForList("SELECT pg_advisory_xact_lock(?)", lockKey(id));
+    for (long key : keys(resourceIds)) {
+      jdbc.queryForList("SELECT pg_advisory_xact_lock(?)", key);
     }
   }
 
-  /** The distinct resource ids in lock order. */
-  static List<UUID> ordered(Collection<UUID> resourceIds) {
-    return resourceIds.stream().distinct().sorted(UUID_ORDER).toList();
+  /** The distinct lock keys of the resources, ascending: the order locks are taken in. */
+  static long[] keys(Collection<UUID> resourceIds) {
+    return resourceIds.stream().mapToLong(ResourceLocks::lockKey).distinct().sorted().toArray();
   }
 
   /**

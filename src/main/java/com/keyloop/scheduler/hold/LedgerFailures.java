@@ -10,11 +10,13 @@ public final class LedgerFailures {
   private LedgerFailures() {}
 
   /**
-   * Whether {@code e} means Redis could not serve the call: connection failure, the 100 ms command
-   * timeout (Lettuce reports it as {@link QueryTimeoutException}), or a command/script error.
+   * Whether {@code e} means the ledger could not serve the call: connection failure, the 100 ms
+   * command timeout (Lettuce reports it as {@link QueryTimeoutException}), a command/script error,
+   * or a ledger that could not be rebuilt ({@link LedgerUnavailableException}).
    */
   public static boolean isRedisFailure(Throwable e) {
-    return e instanceof RedisConnectionFailureException
+    return e instanceof LedgerUnavailableException
+        || e instanceof RedisConnectionFailureException
         || e instanceof RedisSystemException
         || e instanceof QueryTimeoutException;
   }

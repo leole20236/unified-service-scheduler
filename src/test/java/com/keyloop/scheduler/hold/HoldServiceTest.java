@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -191,6 +192,17 @@ class HoldServiceTest {
         .thenThrow(new RedisSystemException("ERR script", new RuntimeException()));
     assertThatThrownBy(() -> service.create(alice, oilAt(MONDAY_9)))
         .isInstanceOf(HoldsUnavailableException.class);
+  }
+
+  @Test
+  void ledgerThatCannotBeRebuiltIsHoldsUnavailable() {
+    doThrow(new LedgerUnavailableException("overtaken"))
+        .when(ledger)
+        .ensureLoaded(any(), any(), any());
+
+    assertThatThrownBy(() -> service.create(alice, oilAt(MONDAY_9)))
+        .isInstanceOf(HoldsUnavailableException.class);
+    verify(ledger, never()).acquire(any(), any(), any(), any(), any(), any(), anyString());
   }
 
   @Test
