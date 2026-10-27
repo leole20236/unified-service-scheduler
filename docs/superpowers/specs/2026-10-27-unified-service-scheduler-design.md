@@ -463,7 +463,7 @@ no Redis lock, no `SERIALIZABLE` needed; `READ COMMITTED` is enough.
 | `SERIALIZABLE` isolation | Correct but higher abort rates and harder reasoning. Unneeded. |
 | **`EXCLUDE` on `tstzrange`** | Correct, lock-free from the app's view, arbitrary durations, one constraint for all resource types. **Chosen.** |
 
-### 8.3 Allocation and persistence (`POST /appointments`)
+### 8.3 Allocation and persistence (`POST /me/appointments`, `POST /dealerships/{d}/appointments`)
 
 Normal customer path: the pair was already chosen and held in Redis (§8.6), so this runs
 **once** with that pair. The candidate loop below is the **direct path**, used when no
@@ -533,7 +533,7 @@ against DB `now()` in the `WHERE` clause.
 
 ### 8.5 Idempotency
 
-`POST /appointments` (customer and dispatcher) requires an `Idempotency-Key` header. A
+Appointment-creating `POST`s (customer and dispatcher) require an `Idempotency-Key` header. A
 retry with the same key and same body returns the stored response; same key with a
 different body ⇒ `422 IDEMPOTENCY_KEY_REUSED`. Keys expire after 24h (cleanup job). This
 stops a flaky mobile connection from creating two bookings.
@@ -563,8 +563,9 @@ can read and write them atomically:
 | `hold:{…}:<holdId>` | hash, TTL 10 min | `userId`, `technicianId`, `bayId`, period, service ids, `expiresAt` |
 | `userhold:{…}:<userId>` | string, TTL 10 min | the user's current hold id (one hold per user per dealership-day) |
 | `ledger-loaded:{…}` | string, TTL 10 min | marker; missing ⇒ ledger rebuilt from the **primary** (one indexed query) before use |
+| `holdref:<holdId>` | string, TTL 10 min | `<dealershipId>:<localDate>` — lets `GET/DELETE /me/holds/{id}` find the hold without exposing Redis key structure in the API (no hash tag: read before the Lua call) |
 
-**`POST /holds`**
+**`POST /me/holds`**
 1. Validate with the caller's policy (§6.3 rules 1–4). No DB write.
 2. Ensure the ledger is loaded.
 3. Lua `acquire_hold`: take time from Redis `TIME` (one clock); drop expired `H` members of
@@ -574,7 +575,7 @@ can read and write them atomically:
 4. Pair found ⇒ `201 { holdId, expiresAt, start, end }`. None ⇒ `409 SLOT_UNAVAILABLE` +
    alternatives computed from the ledger. **No database access in either case.**
 
-**Confirm** — `POST /appointments` with `holdId`:
+**Confirm** — `POST /me/appointments` with `holdId`:
 1. Hold must belong to the caller and match the request body (else `404` / `422`).
 2. Database transaction (§8.3) with the held pair — `EXCLUDE` is the final check.
 3. After commit, Lua turns the `H` members into `R` members and deletes the hold.
@@ -592,7 +593,7 @@ primary — the ledger heals itself.
 | Redis failover loses recent holds / ledger entries | Next request may hold an already-taken pair ⇒ `EXCLUDE` rejects at confirm ⇒ `409`, ledger rebuilt. Never two bookings. |
 | App crashes between DB commit and ledger update | Ledger misses one `R` entry ⇒ same as above until self-heal or the 10-min marker TTL. |
 | Process pauses (GC) past hold TTL | Hold expires; the database still decides. |
-| Redis completely down | `POST /holds` ⇒ `503`; client books via the direct path (§8.3); availability is computed from the database. Slower, still correct. |
+| Redis completely down | `POST /me/holds` ⇒ `503`; client books via the direct path (§8.3); availability is computed from the database. Slower, still correct. |
 | Hold hoarding (one user blocking many slots) | One hold per user per dealership-day; gateway rate limit on `/holds`. |
 
 ### 8.7 Consistency and race review
@@ -772,7 +773,7 @@ is scoped by the caller:
   the user who created it (else `404`).
 - Dispatchers reach customer data only through `/dealerships/{d}/customers…` (guarded by
   the dealership check); customer search requires at least 3 characters and caps results.
-- Dispatcher-only endpoints (§14.2) live under `/dealerships/{dealershipId}/…`; a guard
+- Dispatcher-only endpoints (§14.4) live under `/dealerships/{dealershipId}/…`; a guard
   checks `dealershipId ∈ X-Dealership-Ids` (else `403`), and every query also filters by
   `dealership_id = :dealershipId`, so an appointment ID from another dealership is `404`.
 - Shared catalog reads (`GET /dealerships`, `…/services`, `…/availability`) need an
@@ -865,48 +866,85 @@ on a few dozen resources; the exclusion index handles that trivially.
 
 ## 14. API (REST, `/api/v1`, JSON)
 
-Full OpenAPI 3.1 spec is generated from code (springdoc) and committed as
+The OpenAPI 3.1 spec is generated from code (springdoc) and committed as
 `docs/api/openapi.yaml`; it doubles as the mocked client contract.
 
-### 14.1 Customer endpoints (role `CUSTOMER`; the first three are shared reads open to any authenticated role, §11.3)
+### 14.1 Conventions (and why)
 
-| Method & path | Purpose |
+| Rule | Why |
 |---|---|
-| `GET /dealerships` | List dealerships (id, name, address, zone). Search by location is design-only. |
-| `GET /dealerships/{id}/services` | Service types offered, with durations |
-| `GET /dealerships/{id}/availability?serviceTypeIds=…&from=…&to=…` | Available start times per local date (§9.3) |
-| `GET /me/vehicles` · `POST /me/vehicles` | Customer's vehicles |
-| `POST /holds` | Hold a slot for 10 min (§8.6); body = dealership, vehicle, services, start |
-| `DELETE /holds/{holdId}` | Release my hold early (user went back) |
-| `POST /appointments` *(Idempotency-Key)* | Confirm a hold (`holdId`) or book directly (§8.3) |
-| `GET /me/appointments?status=&from=&to=` | My appointments (cursor paginated) |
-| `GET /me/appointments/{id}` | One of my appointments |
-| `PATCH /me/appointments/{id}` *(If-Match)* | Reschedule: body `{ "holdId": … }` for a hold taken on the new time (re-allocates) |
-| `POST /me/appointments/{id}/cancel` | Cancel |
+| Plural nouns, kebab-case paths, camelCase JSON, UUID ids | Standard, predictable REST naming |
+| Customer-owned resources live under **`/me`**; staff resources under **`/dealerships/{dealershipId}`**; shared catalog reads under `/dealerships` | The path itself says whose data it is, and the scoping rule (§11.3) follows the path prefix |
+| A resource is created and read at the **same** collection (`POST /me/appointments` → `Location: /me/appointments/{id}`) | `201 Created` + `Location` must point at the new resource (RFC 9110) |
+| Field changes use **`PATCH`** with `application/merge-patch+json` (RFC 7396): sent fields change, omitted fields stay | Standard partial-update format, validates cleanly in OpenAPI |
+| State changes that are not field edits are **action sub-resources**, one per action (`POST …/{id}/check-in`, `…/hold`, …), each with its own body schema | One polymorphic `transitions` endpoint would have fields that are required only for some actions — impossible to validate or document clearly |
+| Times: input ISO-8601 with any offset; output **UTC `Z`** + dealership `timeZone` | §7.3 |
+| Collections are wrapped: `{ "items": [...] }`; paginated ones add `"nextCursor"` (null at the end) with `limit` (default 20, max 100) and `cursor` params | Lets responses grow (counts, links) without breaking clients |
+| Every single-appointment response carries `ETag: "<version>"`. `PATCH` and `reschedule` **require** `If-Match` (missing ⇒ `428`, stale ⇒ `412`); action endpoints accept it optionally | Lost-update protection (§8.4) using standard HTTP preconditions |
+| `POST` that creates an appointment **requires** `Idempotency-Key` (1–64 chars). A replay returns the original status and body plus `Idempotency-Replayed: true` | Safe retries on flaky mobile networks (§8.5) |
+| Every response echoes `X-Request-Id`; every error is `application/problem+json` (§14.6), including Spring's 405/406/415 | One error shape for clients and logs |
+| `Cache-Control: private, max-age=300` on catalog reads; `no-store` on availability, holds, schedule and `/me/**` | Catalog changes rarely; everything else is live or personal |
 
-### 14.2 Dispatcher endpoints (role `DISPATCHER`, dealership in `X-Dealership-Ids`)
+### 14.2 Shared reads (any authenticated role)
 
-| Method & path | Purpose |
-|---|---|
-| `GET /dealerships/{d}/schedule?date=YYYY-MM-DD&groupBy=BAY\|TECHNICIAN` | Gantt payload: lanes, appointments, blocks, opening hours |
-| `GET /dealerships/{d}/appointments?date=&status=` | List view |
-| `GET /dealerships/{d}/customers?q=` | Find customers by email, phone or vehicle registration (min 3 chars; returns at most 20) |
-| `POST /dealerships/{d}/customers` | Create a customer without a login (walk-in / phone) |
-| `POST /dealerships/{d}/customers/{customerId}/vehicles` | Add a vehicle for that customer |
-| `POST /dealerships/{d}/appointments` *(Idempotency-Key)* | Book on behalf of a customer: `{ customerId, vehicleId, serviceTypeIds, start, serviceBayId?, technicianId?, overrideHold? }` — direct path (§8.3) with the dispatcher policy (§6.4) |
-| `PATCH /dealerships/{d}/appointments/{id}` *(If-Match)* | Move / reassign / resize (drag-and-drop) |
-| `POST /dealerships/{d}/appointments/{id}/transitions` | `{ "action": "CHECK_IN" \| "START" \| "HOLD" \| "RESUME" \| "COMPLETE" \| "NO_SHOW" \| "CANCEL" }`; `HOLD` also takes `holdReason` (required) and `releaseBay` (default `false`); `RESUME` takes `resumeAt` (default now), optional `technicianId`, `serviceBayId` |
-| `POST /dealerships/{d}/resource-blocks` · `DELETE /dealerships/{d}/resource-blocks/{id}` | Block / unblock a bay or technician |
+| Method & path | Request | Success | Errors |
+|---|---|---|---|
+| `GET /dealerships` | — | `200` `{items:[{id, name, timeZone}]}` | 401 |
+| `GET /dealerships/{dealershipId}/services` | — | `200` `{items:[{id, code, name, durationMinutes}]}` | 401, 404 |
+| `GET /dealerships/{dealershipId}/availability` | `serviceTypeIds` (comma-separated, 1–5), `from`, `to` (dealership-local dates, range ≤ 14 days) | `200` availability (§14.5) — a closed or full day has `starts: []` | 400, 401, 404, 422 `SERVICE_NOT_OFFERED` |
 
-### 14.3 Key payloads
+### 14.3 Customer endpoints (role `CUSTOMER`)
 
-**Book** — `POST /api/v1/appointments`
+| Method & path | Request | Success | Errors |
+|---|---|---|---|
+| `GET /me/vehicles` | — | `200` `{items:[Vehicle]}` | 401, 403 |
+| `POST /me/vehicles` | `{vin, registration, make, model, modelYear, mileage}` | `201` + `Location: /me/vehicles/{id}` | 400, 401, 403, 409 `VEHICLE_ALREADY_EXISTS` |
+| `GET /me/vehicles/{vehicleId}` | — | `200` Vehicle | 401, 403, 404 |
+| `POST /me/holds` | `{dealershipId, vehicleId, serviceTypeIds, start}` | `201` + `Location: /me/holds/{id}`, body `{id, expiresAt, start, end, dealershipId, serviceTypeIds}` | 400, 401, 403, 404, 409 `SLOT_UNAVAILABLE`, 422 (`OUTSIDE_*`, `SERVICE_NOT_OFFERED`), 503 `HOLDS_UNAVAILABLE` |
+| `GET /me/holds/{holdId}` | — | `200` hold (lets the UI restore its countdown after a reload) | 401, 403, 404 (missing, expired or not yours) |
+| `DELETE /me/holds/{holdId}` | — | `204` — also when already expired or gone (DELETE is idempotent) | 401, 403 |
+| `POST /me/appointments` | `Idempotency-Key`; `{holdId?, dealershipId, vehicleId, serviceTypeIds, start, customerNotes?}` (`customerNotes` ≤ 500 chars) | `201` + `Location: /me/appointments/{id}` + `ETag` | 400, 401, 403, 404, 409 `SLOT_UNAVAILABLE` / `REQUEST_IN_PROGRESS`, 422 (`OUTSIDE_*`, `SERVICE_NOT_OFFERED`, `HOLD_MISMATCH`, `IDEMPOTENCY_KEY_REUSED`), 428 |
+| `GET /me/appointments` | `status?`, `from?`, `to?`, `limit?`, `cursor?` | `200` `{items:[Appointment], nextCursor}` | 400, 401, 403 |
+| `GET /me/appointments/{appointmentId}` | — | `200` Appointment + `ETag` | 401, 403, 404 |
+| `POST /me/appointments/{appointmentId}/reschedule` | `If-Match`; `{holdId}` (a hold taken for the new time) | `200` Appointment + new `ETag` | 401, 403, 404, 409 `SLOT_UNAVAILABLE` / `INVALID_TRANSITION`, 412, 422 `CHANGE_WINDOW_CLOSED` / `HOLD_MISMATCH`, 428 |
+| `POST /me/appointments/{appointmentId}/cancel` | `If-Match?`; no body | `200` Appointment (status `CANCELLED`) | 401, 403, 404, 409 `INVALID_TRANSITION`, 412, 422 `CHANGE_WINDOW_CLOSED` |
+
+### 14.4 Dispatcher endpoints (role `DISPATCHER`, `dealershipId` ∈ `X-Dealership-Ids`)
+
+Every row below can also return `401` and `403`.
+
+| Method & path | Request | Success | Errors |
+|---|---|---|---|
+| `GET /dealerships/{d}/schedule` | `date` (local), `groupBy` = `BAY` (default) \| `TECHNICIAN` | `200` schedule (§14.5) | 400 |
+| `GET /dealerships/{d}/customers` | `q` (≥ 3 chars: email, phone or registration prefix), `limit` ≤ 20 | `200` `{items:[{id, displayName, email, phone, vehicles:[Vehicle]}]}` | 400 |
+| `POST /dealerships/{d}/customers` | `{displayName, email?, phone?}` — at least one of email/phone | `201` + `Location: /dealerships/{d}/customers/{id}` | 400 |
+| `GET /dealerships/{d}/customers/{customerId}` | — | `200` customer with vehicles | 404 |
+| `POST /dealerships/{d}/customers/{customerId}/vehicles` | Vehicle body | `201` + `Location` | 400, 404, 409 `VEHICLE_ALREADY_EXISTS` |
+| `POST /dealerships/{d}/appointments` | `Idempotency-Key`; `{customerId, vehicleId, serviceTypeIds, start, serviceBayId?, technicianId?, overrideHold?, customerNotes?}` | `201` + `Location: /dealerships/{d}/appointments/{id}` + `ETag` | 400, 404, 409 `SLOT_UNAVAILABLE` / `SLOT_HELD` / `REQUEST_IN_PROGRESS`, 422 (`OUTSIDE_*`, `SERVICE_NOT_OFFERED`, `TECHNICIAN_NOT_QUALIFIED`, `IDEMPOTENCY_KEY_REUSED`), 428 |
+| `GET /dealerships/{d}/appointments/{id}` | — | `200` Appointment + `ETag` (used to refresh one card after a `412`) | 404 |
+| `PATCH /dealerships/{d}/appointments/{id}` | `If-Match`; `application/merge-patch+json` `{start?, serviceBayId?, technicianId?, durationMinutes?, overrideHold?}` | `200` Appointment + new `ETag` | 400, 404, 409 `SLOT_UNAVAILABLE` / `SLOT_HELD` / `INVALID_TRANSITION` (terminal or `ON_HOLD`), 412, 415, 422 (`START_FIXED`, `TECHNICIAN_NOT_QUALIFIED`, `OUTSIDE_*`), 428 |
+| `POST /dealerships/{d}/appointments/{id}/check-in` | `If-Match?`; — | `200` (`BOOKED → CHECKED_IN`) | 404, 409 `INVALID_TRANSITION`, 412 |
+| `POST /dealerships/{d}/appointments/{id}/start` | `If-Match?`; — | `200` (`CHECKED_IN → IN_PROGRESS`) | 404, 409 `INVALID_TRANSITION`, 412 |
+| `POST /dealerships/{d}/appointments/{id}/hold` | `If-Match?`; `{holdReason: PARTS \| CUSTOMER_APPROVAL, releaseBay?: false}` | `200` (`IN_PROGRESS → ON_HOLD`) | 400, 404, 409 `INVALID_TRANSITION`, 412 |
+| `POST /dealerships/{d}/appointments/{id}/resume` | `If-Match?`; `{resumeAt?, technicianId?, serviceBayId?}` | `200` (`ON_HOLD → IN_PROGRESS`) | 400, 404, 409 `INVALID_TRANSITION` / `SLOT_UNAVAILABLE`, 412, 422 `TECHNICIAN_NOT_QUALIFIED` |
+| `POST /dealerships/{d}/appointments/{id}/complete` | `If-Match?`; — | `200` (`IN_PROGRESS → COMPLETED`) | 404, 409 `INVALID_TRANSITION`, 412 |
+| `POST /dealerships/{d}/appointments/{id}/no-show` | `If-Match?`; — | `200` (`BOOKED → NO_SHOW`) | 404, 409 `INVALID_TRANSITION`, 412, 422 `NO_SHOW_TOO_EARLY` |
+| `POST /dealerships/{d}/appointments/{id}/cancel` | `If-Match?`; `{reason?}` (≤ 200 chars) | `200` (`BOOKED \| CHECKED_IN → CANCELLED`) | 404, 409 `INVALID_TRANSITION`, 412 |
+| `POST /dealerships/{d}/resource-blocks` | `{resourceType: BAY \| TECHNICIAN, resourceId, start, end, reason}` | `201` + `Location: /dealerships/{d}/resource-blocks/{id}` | 400, 404 (resource), 409 `SLOT_UNAVAILABLE` with `conflicts[]` |
+| `DELETE /dealerships/{d}/resource-blocks/{id}` | — | `204` | 404 |
+
+Blocks are read through `GET …/schedule`; the block URI supports `DELETE` only.
+
+### 14.5 Key payloads
+
+**Book** — `POST /api/v1/me/appointments`
 
 ```http
 X-User-Id: 6f1c0d7e-…      X-User-Roles: CUSTOMER
 Idempotency-Key: 9b2f…     Content-Type: application/json
 
 {
+  "holdId": "0192f0b9-…",
   "dealershipId": "a1…",
   "vehicleId": "v9…",
   "serviceTypeIds": ["oil…", "brake…"],
@@ -915,7 +953,7 @@ Idempotency-Key: 9b2f…     Content-Type: application/json
 }
 ```
 
-`201 Created`, `Location: /api/v1/me/appointments/{id}`, `ETag: "0"`:
+`201 Created`, `Location: /api/v1/me/appointments/0192f0c2-…`, `ETag: "0"`:
 
 ```json
 {
@@ -935,8 +973,15 @@ Idempotency-Key: 9b2f…     Content-Type: application/json
 }
 ```
 
-Whether customers see bay/technician names is a product choice; the default is yes for the
-confirmation, no in public availability.
+Customers see bay/technician names on their own confirmation (product choice); availability
+never shows them.
+
+**Hold** — `POST /api/v1/me/holds` ⇒ `201`, `Location: /api/v1/me/holds/0192f0b9-…`:
+
+```json
+{ "id": "0192f0b9-…", "dealershipId": "a1…", "serviceTypeIds": ["oil…", "brake…"],
+  "start": "2026-11-02T09:00:00Z", "end": "2026-11-02T11:00:00Z", "expiresAt": "2026-10-28T14:13:11Z" }
+```
 
 **Availability** — `200`:
 
@@ -944,7 +989,8 @@ confirmation, no in public availability.
 {
   "dealershipId": "a1…", "timeZone": "Europe/London", "durationMinutes": 120,
   "days": [
-    { "date": "2026-11-02", "starts": ["2026-11-02T08:00:00Z", "2026-11-02T08:15:00Z"] }
+    { "date": "2026-11-02", "starts": ["2026-11-02T08:00:00Z", "2026-11-02T08:15:00Z"] },
+    { "date": "2026-11-08", "starts": [] }
   ]
 }
 ```
@@ -953,49 +999,79 @@ confirmation, no in public availability.
 
 ```json
 {
-  "date": "2026-11-02", "timeZone": "Europe/London",
+  "date": "2026-11-02", "timeZone": "Europe/London", "groupBy": "BAY",
   "openingHours": { "opens": "08:00", "closes": "18:00" },
-  "lanes": [ { "id": "bay-3", "type": "BAY", "name": "Bay 3" } ],
-  "technicians": [ { "id": "…", "displayName": "Sam K.", "skills": ["OIL", "BRAKES"] } ],
+  "lanes": [ { "id": "0192e1a0-…", "type": "BAY", "name": "Bay 3" } ],
+  "technicians": [ { "id": "0192e1b4-…", "displayName": "Sam K.", "skills": ["OIL", "BRAKES"] } ],
   "items": [
-    { "kind": "APPOINTMENT", "appointmentId": "…", "version": 2, "status": "IN_PROGRESS",
-      "laneId": "bay-3", "technicianId": "…", "start": "…", "end": "…",
-      "vehicle": "AB12 CDE · Ford Focus", "services": ["OIL_CHANGE"], "overrun": false },
-    { "kind": "BLOCK", "id": "…", "laneId": "bay-3", "start": "…", "end": "…", "reason": "Lift maintenance" }
+    { "kind": "APPOINTMENT", "id": "0192f0c2-…", "version": 2, "status": "ON_HOLD", "holdReason": "PARTS",
+      "laneId": "0192e1a0-…", "technicianId": null, "start": "2026-11-02T09:00:00Z", "end": "2026-11-02T09:40:00Z",
+      "remainingMinutes": 80, "vehicle": "AB12 CDE · Ford Focus", "services": ["OIL_CHANGE", "BRAKE_INSPECTION"], "overrun": false },
+    { "kind": "BLOCK", "id": "0192f0d1-…", "laneId": "0192e1a0-…", "start": "2026-11-02T14:00:00Z",
+      "end": "2026-11-02T16:00:00Z", "reason": "Lift maintenance" }
   ]
 }
 ```
 
-**Drag-and-drop** — `PATCH /api/v1/dealerships/{d}/appointments/{id}`, `If-Match: "2"`:
+**Drag-and-drop** — `PATCH /api/v1/dealerships/{d}/appointments/{id}`,
+`If-Match: "2"`, `Content-Type: application/merge-patch+json`:
 
 ```json
-{ "start": "2026-11-02T13:00:00Z", "serviceBayId": "…", "technicianId": "…", "durationMinutes": 120 }
+{ "start": "2026-11-02T13:00:00Z", "serviceBayId": "0192e1a0-…" }
 ```
 
-All fields optional; omitted ones keep current values.
+### 14.6 Errors (RFC 9457 `application/problem+json`)
 
-### 14.4 Errors (RFC 9457 `application/problem+json`)
+**Message rules.** `title` is fixed per `code` (clients may translate it). `detail` is one
+specific, human sentence that says what was wrong and, when possible, what to do next; times
+in `detail` are in the dealership's local time with its zone name, while machine fields
+(`alternatives`, `conflicts`) stay UTC. A `404` never reveals whether the resource exists for
+someone else. No stack traces, SQL or internal ids of other users ever appear. Every problem
+carries `code`, `traceId`, and `errors[]` for validation failures.
 
-| HTTP | `code` | When |
-|---|---|---|
-| 400 | `VALIDATION_ERROR` | Bad body/params (`errors[]` lists fields) |
-| 401 | `UNAUTHENTICATED` | Missing/malformed identity headers |
-| 403 | `FORBIDDEN` | Wrong role, or dealership not in `X-Dealership-Ids` |
-| 404 | `NOT_FOUND` | Missing **or not yours** |
-| 409 | `SLOT_UNAVAILABLE` | No bay+technician pair free; body has `alternatives[]` (and `conflicts[]` for dispatchers) |
-| 409 | `SLOT_HELD` | Dispatcher target overlaps a customer's live hold (retry with `overrideHold`) |
-| 409 | `REQUEST_IN_PROGRESS` | Same idempotency key is being processed |
-| 409 | `INVALID_TRANSITION` | Status change not allowed |
-| 503 | `HOLDS_UNAVAILABLE` | Redis down; client should book directly |
-| 412 | `VERSION_CONFLICT` | `If-Match` doesn't match current version |
-| 422 | `OUTSIDE_OPENING_HOURS`, `OUTSIDE_BOOKING_WINDOW`, `CHANGE_WINDOW_CLOSED`, `TECHNICIAN_NOT_QUALIFIED`, `IDEMPOTENCY_KEY_REUSED` | Business rule violations |
-| 428 | `PRECONDITION_REQUIRED` | `If-Match` / `Idempotency-Key` missing |
+| HTTP | `code` | `title` | Example `detail` |
+|---|---|---|---|
+| 400 | `VALIDATION_ERROR` | Request is invalid | "2 fields are invalid." + `errors: [{field: "vin", message: "must be 17 characters"}]` |
+| 401 | `UNAUTHENTICATED` | Authentication required | "Missing or invalid identity headers." |
+| 403 | `FORBIDDEN` | Not allowed | "Your account cannot act for dealership a1…." |
+| 404 | `NOT_FOUND` | Resource not found | "Appointment not found." |
+| 405 / 406 / 415 | `METHOD_NOT_ALLOWED` / `NOT_ACCEPTABLE` / `UNSUPPORTED_MEDIA_TYPE` | (standard) | "PATCH requires Content-Type application/merge-patch+json." |
+| 409 | `SLOT_UNAVAILABLE` | Requested time is not available | "No qualified technician and bay are free at 09:00 on Mon 2 Nov (Europe/London)." + `alternatives[]` (+ `conflicts[]` for dispatchers) |
+| 409 | `SLOT_HELD` | Time is held by a customer | "A customer is holding this time until 09:41 (Europe/London). Resend with overrideHold=true to take it." |
+| 409 | `INVALID_TRANSITION` | Action not allowed in current status | "Cannot start an appointment that is BOOKED; check it in first." |
+| 409 | `REQUEST_IN_PROGRESS` | Duplicate request in progress | "A request with this Idempotency-Key is still being processed. Retry shortly." + `Retry-After: 1` |
+| 409 | `VEHICLE_ALREADY_EXISTS` | Vehicle already registered | "This customer already has a vehicle with this VIN." |
+| 412 | `VERSION_CONFLICT` | Appointment was changed by someone else | "You edited version 2 but the current version is 3. Reload and try again." |
+| 421 | `MISDIRECTED_REGION` *(gateway)* | Wrong region | "This account belongs to region eu-west." |
+| 422 | `OUTSIDE_BOOKING_WINDOW` | Time is outside the booking window | "Online bookings must start at least 2 hours from now and within 60 days." |
+| 422 | `OUTSIDE_OPENING_HOURS` | Outside opening hours | "Riverside Motors is open 08:00–18:00 on Mondays; a 120-minute job starting at 17:00 would end after closing." |
+| 422 | `CHANGE_WINDOW_CLOSED` | Too late to change | "This appointment starts in 6 hours; online changes close 24 hours before. Please call the dealership." |
+| 422 | `SERVICE_NOT_OFFERED` | Service not offered here | "Brake Inspection is not offered at Riverside Motors." |
+| 422 | `TECHNICIAN_NOT_QUALIFIED` | Technician lacks required skills | "Lee P. does not have the BRAKES skill required by Brake Inspection." |
+| 422 | `START_FIXED` | Start time can no longer change | "Work has already started; you can still change the technician, bay or end time." |
+| 422 | `NO_SHOW_TOO_EARLY` | Too early to mark no-show | "No-show can be recorded from 09:30 (30 minutes after the start)." |
+| 422 | `HOLD_MISMATCH` | Hold does not match the request | "Your hold is for 09:00 with Oil Change; this request asks for 10:00." |
+| 422 | `IDEMPOTENCY_KEY_REUSED` | Idempotency key reused | "This Idempotency-Key was already used with a different request body." |
+| 428 | `PRECONDITION_REQUIRED` | Precondition header required | "If-Match header is required for this request." |
+| 429 | `RATE_LIMITED` *(gateway)* | Too many requests | "Too many hold requests; try again in 10 seconds." + `Retry-After: 10` |
+| 500 | `INTERNAL_ERROR` | Unexpected error | "Something went wrong. Quote the traceId when contacting support." |
+| 503 | `HOLDS_UNAVAILABLE` | Slot holds temporarily unavailable | "Holds are unavailable right now; you can still book directly." + `Retry-After: 30` |
+| 503 | `SERVICE_UNAVAILABLE` | Service temporarily unavailable | "Please retry shortly." + `Retry-After: 5` |
+
+**Why 409 vs 412 vs 422.** `409` = the request clashes with the *current state* of a
+resource (time taken, wrong status, duplicate). `412` = the client's `If-Match` precondition
+failed (someone else changed it). `422` = the request is well-formed but breaks a business
+rule regardless of current state. `400` = malformed input.
 
 ```json
 {
   "type": "https://scheduler.example/problems/slot-unavailable",
-  "title": "Requested time is no longer available",
-  "status": 409, "code": "SLOT_UNAVAILABLE", "traceId": "4bf92f…",
+  "title": "Requested time is not available",
+  "status": 409,
+  "detail": "No qualified technician and bay are free at 09:00 on Mon 2 Nov (Europe/London).",
+  "instance": "/api/v1/me/appointments",
+  "code": "SLOT_UNAVAILABLE",
+  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
   "alternatives": ["2026-11-02T09:15:00Z", "2026-11-02T10:00:00Z"]
 }
 ```
@@ -1008,7 +1084,7 @@ All fields optional; omitted ones keep current values.
 ┌─ 1. Vehicle ───────────────┐ ┌─ 2. Dealership & services ─┐ ┌─ 3. Date & time ────────────┐
 │ ○ AB12 CDE  Ford Focus     │ │ Riverside Motors   [change]   │ │  Mon 2 Nov  Tue 3  Wed 4 ▸  │
 │ ○ XY65 ZZZ  VW Golf        │ │ ☑ Oil Change        45 min │ │  08:00  08:15  09:00  09:15 │
-│                            │ │                            │ │  tap a time ⇒ POST /holds   │
+│                            │ │                            │ │ tap a time ⇒ POST /me/holds │
 │ + Add vehicle (VIN/reg)    │ │ ☑ Brake Inspection  75 min │ │  10:00  13:30  14:00        │
 │ Mileage [ 42,300 ]         │ │ ☐ MOT               60 min │ │  Times shown in UK time     │
 │                 [Next ▸]   │ │ Total 2h 00m     [Next ▸]  │ │                  [Next ▸]   │
@@ -1047,7 +1123,7 @@ Interactions → API:
 | Drag card horizontally | `PATCH` with new `start`, `If-Match` | `409`/`412` ⇒ card snaps back, toast names the conflict, board refreshes |
 | Drag to another lane | `PATCH` with `serviceBayId` (bay view) or `technicianId` (tech view) | `422 TECHNICIAN_NOT_QUALIFIED` ⇒ snap back; lanes of unqualified techs are greyed while dragging (skills come in the schedule payload) |
 | Drag card edge | `PATCH` with `durationMinutes` | as above |
-| Card menu | `POST …/transitions` | `409 INVALID_TRANSITION` ⇒ menu only shows legal actions anyway |
+| Card menu | `POST …/{id}/check-in`, `/start`, `/hold`, `/resume`, `/complete`, `/no-show`, `/cancel` | `409 INVALID_TRANSITION` ⇒ menu only shows legal actions anyway |
 | Select empty range on a lane | `POST …/resource-blocks` | `409` lists overlapping jobs |
 
 The UI never decides correctness: it predicts conflicts for good UX, and the server's
@@ -1118,7 +1194,7 @@ for HTTP, JDBC, Redis, outbox publish. Trace id is echoed in every problem respo
 | SLO | Target |
 |---|---|
 | Booking API availability | 99.9 % monthly |
-| `POST /appointments` latency | p99 < 300 ms |
+| `POST /me/appointments` latency | p99 < 300 ms |
 | Availability latency | p99 < 150 ms |
 | Event delivery | 99 % published < 5 s after commit |
 
