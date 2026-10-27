@@ -11,6 +11,7 @@ spring:
       connect-timeout: 100ms
 
 app:
+  region: eu-west
   datasource:
     primary:
       url: jdbc:postgresql://localhost:5432/scheduler
