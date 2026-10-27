@@ -80,6 +80,7 @@ public class RoutingDataSourceConfig {
     pool.setPoolName(name);
     pool.setMaximumPoolSize(size);
     pool.setConnectionInitSql(INIT_SQL);
+    pool.addDataSourceProperty("ApplicationName", "scheduler-" + name);
     return pool;
   }
 

@@ -1,8 +1,9 @@
 package com.keyloop.scheduler.common.time;
 
-import com.keyloop.scheduler.common.db.PrimaryRead;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import javax.sql.DataSource;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
@@ -12,13 +13,15 @@ public class DbClock {
 
   private final JdbcTemplate jdbc;
 
-  /** Creates the clock over the given JDBC template. */
-  public DbClock(JdbcTemplate jdbc) {
-    this.jdbc = jdbc;
+  /**
+   * Creates the clock directly over the primary pool, so it never follows the caller's transaction
+   * (a read-only transaction would otherwise route to the replica's clock).
+   */
+  public DbClock(@Qualifier("primaryDataSource") DataSource primary) {
+    this.jdbc = new JdbcTemplate(primary);
   }
 
   /** Current instant according to the primary database. */
-  @PrimaryRead
   public Instant now() {
     return jdbc.queryForObject("SELECT now()", OffsetDateTime.class).toInstant();
   }
