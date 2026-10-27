@@ -1076,45 +1076,31 @@ rule regardless of current state. `400` = malformed input.
 }
 ```
 
-## 15. UI design (wireframes — not built)
+## 15. UI design (mockups — not built)
+
+Rendered mockups (PNG) with their HTML sources in `docs/ui/`. Re-render with any headless
+browser if the HTML changes.
 
 ### 15.1 B2C booking flow (mirrors Keyloop / Xtime: vehicle → services → time → confirm)
 
-```
-┌─ 1. Vehicle ───────────────┐ ┌─ 2. Dealership & services ─┐ ┌─ 3. Date & time ────────────┐
-│ ○ AB12 CDE  Ford Focus     │ │ Riverside Motors   [change]   │ │  Mon 2 Nov  Tue 3  Wed 4 ▸  │
-│ ○ XY65 ZZZ  VW Golf        │ │ ☑ Oil Change        45 min │ │  08:00  08:15  09:00  09:15 │
-│                            │ │                            │ │ tap a time ⇒ POST /me/holds │
-│ + Add vehicle (VIN/reg)    │ │ ☑ Brake Inspection  75 min │ │  10:00  13:30  14:00        │
-│ Mileage [ 42,300 ]         │ │ ☐ MOT               60 min │ │  Times shown in UK time     │
-│                 [Next ▸]   │ │ Total 2h 00m     [Next ▸]  │ │                  [Next ▸]   │
-└────────────────────────────┘ └────────────────────────────┘ └─────────────────────────────┘
-┌─ 4. Review & confirm ──────────────────────┐   On 409: "Sorry, 09:00 was just taken.
-│ ⏱ Held for you · 9:41 left                 │    Nearest times: 09:15 · 10:00 · 13:30"
-│ Mon 2 Nov, 09:00–11:00 (UK time)           │
-│ Ford Focus · Oil Change + Brake Inspection │    (one tap rebooks, same Idempotency
-│ Notes [ Squeaking front left            ]  │     flow with a new key)
-│                       [Confirm booking]    │
-└────────────────────────────────────────────┘
-```
+![B2C booking flow](../../diagrams/ui-01-customer-booking.png)
 
-"My appointments" lists upcoming/past bookings with Reschedule / Cancel (disabled within
-24h, with the reason shown). Transport options appear as step 3b in the design-only
-extension.
+Tapping a time calls `POST /me/holds`; the review screen shows the 10-minute hold countdown
+and confirms with `POST /me/appointments` + `holdId`. Closed days are shown but disabled;
+times taken by other customers' holds simply don't appear.
+
+![B2C states: conflict, confirmation, my appointments](../../diagrams/ui-02-customer-states.png)
+
+- **409 `SLOT_UNAVAILABLE`** becomes a bottom sheet with the `alternatives[]`; one tap holds
+  the new time.
+- **My appointments**: Reschedule / Cancel are disabled inside 24 h with the reason shown up
+  front, so the user never has to hit `422 CHANGE_WINDOW_CLOSED`.
 
 ### 15.2 Dispatcher Gantt board
 
-```
- Riverside Motors · Mon 2 Nov 2026 · Europe/London   [◂ Day ▸]  Group by: (•) Bay ( ) Technician   ⟳ 30s
-          08:00     09:00     10:00     11:00     12:00     13:00     14:00     15:00 ... 18:00
- Bay 1   │████ AB12CDE Oil+Brake ████│                 │▓▓ XY65 MOT ▓▓│
-         │ Sam K. · IN_PROGRESS      │                 │ Lee P.·BOOKED│
- Bay 2   │░░░░░░ Lift maintenance (block) ░░░░░░│  │████ KL20 Brakes ████▌overrun
- Bay 3   │          │▓▓▓ JK70 Service ▓▓▓│
-         └ unassigned / waiting list ───────────────────────────────────────────────────────
- Legend: ▓ BOOKED  █ IN_PROGRESS  ▒ ON_HOLD (🔧 parts / 💬 awaiting approval, remaining time
-         shown unscheduled until RESUME)  ░ BLOCK  ▌ overrun   now ▏
-```
+![Dispatcher board](../../diagrams/ui-03-dispatcher-board.png)
+
+![Dispatcher dialogs: walk-in booking, put on hold, resume](../../diagrams/ui-04-dispatcher-dialogs.png)
 
 Interactions → API:
 

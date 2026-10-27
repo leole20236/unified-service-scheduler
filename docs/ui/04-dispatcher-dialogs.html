@@ -1,0 +1,61 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="ui.css"><style>
+.dlg{width:470px;background:#fff;border-radius:18px;box-shadow:0 14px 34px rgba(20,30,50,.18);border:1px solid #dfe4ec;overflow:hidden}
+.dh{padding:16px 20px;border-bottom:1px solid #edf0f4;display:flex;justify-content:space-between;align-items:center}
+.dh b{font-size:17px}
+.db{padding:16px 20px;display:flex;flex-direction:column;gap:12px}
+.df{padding:14px 20px;border-top:1px solid #edf0f4;display:flex;justify-content:flex-end;gap:10px}
+.res{border:1.5px solid #e1e6ee;border-radius:10px;overflow:hidden}
+.res div{padding:9px 12px;border-bottom:1px solid #eef1f5;font-size:13.5px}
+.res div:last-child{border:none}
+.opt{display:flex;gap:10px;align-items:flex-start;border:1.5px solid #e1e6ee;border-radius:12px;padding:12px}
+.opt.sel{border-color:#d18b00;background:#fffaf0}
+.toggle{width:40px;height:22px;border-radius:11px;background:#2f9e5b;position:relative;flex:none}
+.toggle:after{content:"";position:absolute;right:3px;top:3px;width:16px;height:16px;border-radius:50%;background:#fff}
+.toggle.off{background:#cfd5df}.toggle.off:after{right:auto;left:3px}
+select,.sel2{border:1.5px solid #d4dae3;border-radius:10px;padding:10px 12px;font-size:14px;background:#fff}
+</style></head><body>
+<h1 class="page">Dispatcher dialogs — walk-in / phone booking, put on hold, resume</h1>
+<p class="sub">Walk-in uses <code>GET/POST /dealerships/{d}/customers</code> then <code>POST /dealerships/{d}/appointments</code> (Idempotency-Key). Hold and resume use <code>POST …/{id}/hold</code> and <code>POST …/{id}/resume</code>.</p>
+<div class="row">
+<div class="col"><div class="cap">New booking (walk-in / phone)</div><div class="dlg">
+ <div class="dh"><b>New booking</b><span class="muted">✕</span></div>
+ <div class="db">
+  <div class="lbl">Customer</div>
+  <div class="input">🔍 ab12</div>
+  <div class="res"><div style="background:#f2f6ff"><b>Alice Walker</b> · alice@…mail.com · <b>AB12 CDE</b> Ford Focus</div><div><b>Abdul Rahman</b> · 07700 9…· AB12 XYZ Kia Ceed</div><div style="color:#2563eb;font-weight:600">+ New customer (no login needed)</div></div>
+  <div class="lbl">Services</div>
+  <div class="chips"><span class="chip on">Oil Change · 45</span><span class="chip on">Brake Inspection · 75</span><span class="chip">Diagnostic · 60</span></div>
+  <div class="between"><div style="flex:1"><div class="lbl">Start</div><div class="input" style="margin-top:6px">Today 11:20 (now)</div></div><div style="width:14px"></div><div style="flex:1"><div class="lbl">Ends</div><div class="input" style="margin-top:6px;color:#6b7486">13:20 · may pass closing</div></div></div>
+  <div class="lbl">Technician (optional)</div>
+  <div class="res"><div>Auto-assign (least busy qualified) ✓</div><div>Sam K. · OIL, BRAKES</div><div style="color:#b3bac6">Lee P. · lacks BRAKES</div><div>Tom R. · OIL, BRAKES, DIAG · busy until 11:45</div></div>
+  <div class="banner green" style="font-weight:500">✓ Bay 4 + Sam K. free 11:20–13:20</div>
+ </div>
+ <div class="df"><span class="btn sm sec">Cancel</span><span class="btn sm" style="background:#2563eb;color:#fff">Book walk-in</span></div>
+</div></div>
+
+<div class="col"><div class="cap">Put on hold — AB12 CDE (IN_PROGRESS)</div><div class="dlg">
+ <div class="dh"><b>Put job on hold</b><span class="muted">✕</span></div>
+ <div class="db">
+  <div class="muted">Worked so far: <b>40 min</b> of 120 · Bay 3 · Sam K.</div>
+  <div class="lbl">Reason (required)</div>
+  <div class="opt sel"><div class="radio on" style="border-color:#d18b00"></div><div><b>🔧 Waiting for parts</b><div class="muted">Brake pads ordered — ETA tomorrow</div></div></div>
+  <div class="opt"><div class="radio"></div><div><b>💬 Waiting for customer approval</b><div class="muted">Extra work found, customer must agree</div></div></div>
+  <div class="between card"><div><b>Release the bay</b><div class="muted">Car moved to the yard — Bay 3 free for other jobs</div></div><div class="toggle"></div></div>
+  <div class="banner amber" style="font-weight:500">Sam K. is released now and can take other jobs. The remaining <b>80 min</b> will be planned when you resume.</div>
+ </div>
+ <div class="df"><span class="btn sm sec">Back</span><span class="btn sm" style="background:#d18b00;color:#fff">Put on hold</span></div>
+</div></div>
+
+<div class="col"><div class="cap">Resume — AB12 CDE (ON_HOLD · parts)</div><div class="dlg">
+ <div class="dh"><b>Resume job</b><span class="muted">✕</span></div>
+ <div class="db">
+  <div class="muted">Remaining work: <b>80 min</b> (120 planned − 40 worked)</div>
+  <div class="lbl">Resume at</div><div class="input">Tue 3 Nov · 09:00</div>
+  <div class="lbl">Technician</div><div class="sel2">Sam K. · OIL, BRAKES ▾</div>
+  <div class="lbl">Bay</div><div class="sel2">Bay 3 ▾</div>
+  <div class="banner red" style="font-weight:500">409 · Sam K. is busy 09:00–10:15 (MN18 KLM). Nearest free: 10:15 with Sam K., or 09:00 with Tom R.</div>
+  <div class="chips"><span class="chip on">10:15 · Sam K.</span><span class="chip">09:00 · Tom R.</span></div>
+ </div>
+ <div class="df"><span class="btn sm sec">Back</span><span class="btn sm" style="background:#2f9e5b;color:#fff">Resume at 10:15</span></div>
+</div></div>
+</div></body></html>

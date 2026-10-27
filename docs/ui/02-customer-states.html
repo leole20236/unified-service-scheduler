@@ -1,0 +1,52 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="ui.css"></head><body>
+<h1 class="page">B2C states — conflict, success, my appointments</h1>
+<p class="sub">How API responses surface to the customer: <code>409 SLOT_UNAVAILABLE</code> with alternatives, <code>201 Created</code>, and the per-appointment rules (<code>422 CHANGE_WINDOW_CLOSED</code> shown before the user even tries).</p>
+<div class="row">
+<div class="col"><div class="cap">409 SLOT_UNAVAILABLE → alternatives</div><div class="phone">
+ <div class="ph-top"><div class="t">Pick a time</div><div class="steps"><span class="on"></span><span class="on"></span><span class="on"></span><span></span></div></div>
+ <div class="ph-body">
+  <div class="chips" style="opacity:.35"><span class="chip">08:00</span><span class="chip">08:15</span><span class="chip">09:00</span><span class="chip">09:15</span><span class="chip">10:00</span></div>
+  <div class="sheet"><div class="in">
+   <div style="font-size:30px">😕</div>
+   <div style="font-weight:700;font-size:18px">Sorry, 09:00 was just taken</div>
+   <div class="muted">Someone booked it a moment ago. These are the nearest times with a qualified technician and a free bay:</div>
+   <div class="chips"><span class="chip on">09:15</span><span class="chip">10:00</span><span class="chip">13:30</span><span class="chip">14:00</span><span class="chip">15:15</span></div>
+   <button class="btn pri">Hold 09:15 instead</button>
+   <button class="btn sec">See other days</button>
+  </div></div>
+ </div>
+</div></div>
+
+<div class="col"><div class="cap">201 Created → confirmation</div><div class="phone">
+ <div class="ph-top"><div class="t">Booking confirmed</div></div>
+ <div class="ph-body" style="align-items:stretch">
+  <div style="text-align:center;margin-top:10px"><div style="width:72px;height:72px;border-radius:50%;background:#e8f7ee;color:#1d6b3a;font-size:38px;line-height:72px;margin:0 auto">✓</div>
+  <div style="font-weight:700;font-size:20px;margin-top:12px">You're booked!</div><div class="muted">Confirmation sent by email</div></div>
+  <div>
+   <div class="kv"><span>When</span><b>Mon 2 Nov · 09:00–11:00</b></div>
+   <div class="kv"><span>Where</span><b>Riverside Motors</b></div>
+   <div class="kv"><span>Bay / technician</span><b>Bay 3 · Sam K.</b></div>
+   <div class="kv"><span>Reference</span><b>#F0C2</b></div>
+  </div>
+  <div class="note">Arrive 5–10 minutes early. You can drop the car off earlier — it waits in the yard until its slot.</div>
+ </div>
+ <div class="ph-foot" style="display:flex;flex-direction:column;gap:8px"><button class="btn sec">Add to calendar</button><button class="btn pri">View my appointments</button></div>
+</div></div>
+
+<div class="col"><div class="cap">My appointments — GET /me/appointments</div><div class="phone">
+ <div class="ph-top"><div class="t">My appointments</div></div>
+ <div class="ph-body">
+  <div class="lbl">Upcoming</div>
+  <div class="card"><div class="between"><b>Mon 2 Nov · 09:00</b><span class="pill p-booked">BOOKED</span></div>
+   <div class="muted" style="margin:4px 0 10px">AB12 CDE · Oil Change + Brake Inspection<br>Riverside Motors</div>
+   <div class="flex"><span class="btn sm sec">Reschedule</span><span class="btn sm" style="background:#fff;color:#9b1c1c;border:1.5px solid #f0b4b4">Cancel</span></div></div>
+  <div class="card"><div class="between"><b>Tomorrow · 08:15</b><span class="pill p-booked">BOOKED</span></div>
+   <div class="muted" style="margin:4px 0 10px">XY65 ZZZ · Diagnostic · Riverside Motors</div>
+   <div class="flex"><span class="btn sm dis">Reschedule</span><span class="btn sm dis">Cancel</span></div>
+   <div class="banner grey" style="margin-top:10px;font-size:12px">Online changes close 24 h before the appointment. Call 01372 000 000.</div></div>
+  <div class="lbl">Past</div>
+  <div class="card" style="opacity:.8"><div class="between"><b>12 Sep · 10:00</b><span class="pill p-done">COMPLETED</span></div><div class="muted">AB12 CDE · Oil Change</div></div>
+  <div class="card" style="opacity:.8"><div class="between"><b>3 Jun · 14:00</b><span class="pill p-cancel">CANCELLED</span></div><div class="muted">XY65 ZZZ · Brake Inspection</div></div>
+ </div>
+</div></div>
+</div></body></html>
