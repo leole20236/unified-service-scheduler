@@ -578,9 +578,10 @@ can read and write them atomically:
 | `userhold:{…}:<userId>` | string, TTL 10 min | the user's current hold id (one hold per user per dealership-day) |
 | `ledger-loaded:{…}` | string, TTL 10 min | marker; missing ⇒ ledger rebuilt from the **primary** (one indexed query) before use |
 | `holdref:<holdId>` | string, TTL 10 min | `<dealershipId>:<localDate>` — lets `GET/DELETE /me/holds/{id}` find the hold without exposing Redis key structure in the API (no hash tag: read before the Lua call) |
+| `ledger-gen:{…}` | integer | generation counter bumped by every write-through; a rebuild records it before reading the primary and refuses to install its snapshot if it changed — a rebuild can never overwrite newer data. After 3 overtaken attempts the ledger is treated as unavailable for that call (availability from the database, holds `503`) |
 
 **`POST /me/holds`**
-1. Validate with the caller's policy (§6.3 rules 1–4). No DB write.
+1. Validate with the caller's policy (§6.3 rules 1–4). No DB write. To keep a refused hold free of database work, the booking-window check here uses Redis `TIME`, and vehicle ownership is read from the replica (primary only on a miss); the confirm transaction re-checks both against the primary and DB `now()`, so correctness never depends on these early checks.
 2. Ensure the ledger is loaded.
 3. Lua `acquire_hold`: take time from Redis `TIME` (one clock); drop expired `H` members of
    the touched sets; release the caller's previous hold; walk the ranked technician × bay
