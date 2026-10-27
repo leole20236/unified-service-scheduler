@@ -26,14 +26,13 @@ final class PolicyChecks {
 
   private PolicyChecks() {}
 
-  static void startWindow(JobPlan plan, DealershipView d, Instant earliest, Instant now) {
+  static void startWindow(JobPlan plan, DealershipView d, Instant earliest, Instant latest) {
     Instant start = plan.period().start();
     if (start.isBefore(earliest)) {
       throw new BusinessRuleException(
           ProblemCodes.OUTSIDE_BOOKING_WINDOW,
           "The earliest start you can book is " + local(d, earliest) + ".");
     }
-    Instant latest = now.plus(MAX_AHEAD);
     if (start.isAfter(latest)) {
       throw new BusinessRuleException(
           ProblemCodes.OUTSIDE_BOOKING_WINDOW,

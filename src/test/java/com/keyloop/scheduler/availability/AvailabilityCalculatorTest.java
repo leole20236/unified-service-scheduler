@@ -24,6 +24,7 @@ class AvailabilityCalculatorTest {
 
   private static final LocalDate MONDAY = LocalDate.of(2026, 11, 2);
   private static final Instant LONG_AGO = Instant.parse("2020-01-01T00:00:00Z");
+  private static final Instant FAR_AHEAD = Instant.parse("2030-01-01T00:00:00Z");
 
   private static ResourceCatalog riverside() {
     return new ResourceCatalog(
@@ -154,7 +155,7 @@ class AvailabilityCalculatorTest {
     Occupancy booked = Occupancy.empty().plus(Fixtures.SAM, london(MONDAY, 9, 0, 9, 45));
 
     List<OffsetDateTime> alternatives =
-        AvailabilityCalculator.alternatives(c, plan, booked, LONG_AGO, 5);
+        AvailabilityCalculator.alternatives(c, plan, d -> booked, LONG_AGO, FAR_AHEAD, 5);
 
     assertThat(localTimes(alternatives))
         .containsExactly(
@@ -172,10 +173,100 @@ class AvailabilityCalculatorTest {
     JobPlan plan = JobPlanner.plan(c, List.of(Fixtures.OIL_CHANGE), requested);
 
     List<OffsetDateTime> alternatives =
-        AvailabilityCalculator.alternatives(c, plan, Occupancy.empty(), LONG_AGO, 3);
+        AvailabilityCalculator.alternatives(
+            c, plan, d -> Occupancy.empty(), LONG_AGO, FAR_AHEAD, 3);
 
     assertThat(alternatives).hasSize(3);
     assertThat(alternatives.get(0).toInstant()).isEqualTo(Instant.parse("2026-11-02T17:00:00Z"));
     assertThat(alternatives).isSortedAccordingTo(java.util.Comparator.naturalOrder());
+  }
+
+  @Test
+  void alternativesSkipFullyBookedNextDayAndLoadEachDateLazily() {
+    // Solo catalog in London; requested Monday 17:00 (last start of the day for 45 min is 17:15)
+    ResourceCatalog c = solo();
+    OffsetDateTime requested = OffsetDateTime.parse("2026-11-02T17:15:00Z");
+    JobPlan plan = JobPlanner.plan(c, List.of(Fixtures.OIL_CHANGE), requested);
+    LocalDate tuesday = MONDAY.plusDays(1);
+    Occupancy tuesdayFull =
+        Occupancy.empty()
+            .plus(Fixtures.SOLO_TECH, london(tuesday, 8, 0, 18, 0))
+            .plus(Fixtures.SOLO_BAY, london(tuesday, 8, 0, 18, 0));
+    List<LocalDate> loaded = new java.util.ArrayList<>();
+
+    List<OffsetDateTime> alternatives =
+        AvailabilityCalculator.alternatives(
+            c,
+            plan,
+            date -> {
+              loaded.add(date);
+              return date.equals(tuesday) ? tuesdayFull : Occupancy.empty();
+            },
+            LONG_AGO,
+            FAR_AHEAD,
+            2);
+
+    // Monday has nothing after 17:15, Tuesday is full, so both come from Wednesday morning
+    LocalDate wednesday = MONDAY.plusDays(2);
+    assertThat(alternatives)
+        .extracting(OffsetDateTime::toInstant)
+        .containsExactly(
+            london(wednesday, 8, 0, 9, 0).start(), london(wednesday, 8, 15, 9, 0).start());
+    assertThat(loaded).containsExactly(MONDAY, tuesday, wednesday);
+  }
+
+  @Test
+  void alternativesNeverLoadClosedDays() {
+    // Riverside is closed on Sunday 8 Nov
+    ResourceCatalog c = riverside();
+    OffsetDateTime requested = OffsetDateTime.parse("2026-11-07T17:00:00Z");
+    JobPlan plan = JobPlanner.plan(c, List.of(Fixtures.OIL_CHANGE), requested);
+    List<LocalDate> loaded = new java.util.ArrayList<>();
+
+    List<OffsetDateTime> alternatives =
+        AvailabilityCalculator.alternatives(
+            c,
+            plan,
+            date -> {
+              loaded.add(date);
+              return Occupancy.empty();
+            },
+            LONG_AGO,
+            FAR_AHEAD,
+            1);
+
+    assertThat(alternatives.get(0).toInstant()).isEqualTo(Instant.parse("2026-11-07T17:15:00Z"));
+    assertThat(loaded).containsExactly(LocalDate.of(2026, 11, 7));
+    loaded.clear();
+    JobPlan late =
+        JobPlanner.plan(
+            c, List.of(Fixtures.OIL_CHANGE), OffsetDateTime.parse("2026-11-07T17:15:00Z"));
+    AvailabilityCalculator.alternatives(
+        c,
+        late,
+        date -> {
+          loaded.add(date);
+          return Occupancy.empty();
+        },
+        LONG_AGO,
+        FAR_AHEAD,
+        1);
+    assertThat(loaded).containsExactly(LocalDate.of(2026, 11, 7), LocalDate.of(2026, 11, 9));
+  }
+
+  @Test
+  void alternativesStopAtLatestStart() {
+    ResourceCatalog c = riverside();
+    OffsetDateTime requested = OffsetDateTime.parse("2026-11-02T09:00:00Z");
+    JobPlan plan = JobPlanner.plan(c, List.of(Fixtures.OIL_CHANGE), requested);
+    Instant latest = Instant.parse("2026-11-02T09:30:00Z");
+
+    List<OffsetDateTime> alternatives =
+        AvailabilityCalculator.alternatives(c, plan, d -> Occupancy.empty(), LONG_AGO, latest, 5);
+
+    assertThat(alternatives)
+        .extracting(OffsetDateTime::toInstant)
+        .containsExactly(
+            Instant.parse("2026-11-02T09:15:00Z"), Instant.parse("2026-11-02T09:30:00Z"));
   }
 }

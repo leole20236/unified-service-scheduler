@@ -384,4 +384,12 @@ class BookingPolicyTest {
     assertThat(AppointmentStatus.BOOKED.isTerminal()).isFalse();
     assertThat(AppointmentStatus.ON_HOLD.isTerminal()).isFalse();
   }
+
+  @Test
+  void latestStartIsSixtyDaysAheadForBothActors() {
+    Instant sixtyDays = Instant.parse("2026-12-31T10:00:00Z");
+
+    assertThat(CUSTOMER.latestStart(NOW)).isEqualTo(sixtyDays);
+    assertThat(DISPATCHER.latestStart(NOW)).isEqualTo(sixtyDays);
+  }
 }

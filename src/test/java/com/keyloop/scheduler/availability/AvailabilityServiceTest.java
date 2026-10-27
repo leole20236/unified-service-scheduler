@@ -143,4 +143,20 @@ class AvailabilityServiceTest {
                     customer, Fixtures.RIVERSIDE, List.of(UUID.randomUUID()), MONDAY, MONDAY))
         .isInstanceOf(BusinessRuleException.class);
   }
+
+  @Test
+  void startsBeyondSixtyDaysAreNotOffered() {
+    // NOW + 60 days = 2027-01-01T08:00Z, which is Riverside's 08:00 opening that Friday
+    AvailabilityView view =
+        service.find(
+            customer,
+            Fixtures.RIVERSIDE,
+            List.of(Fixtures.OIL_CHANGE),
+            LocalDate.of(2026, 12, 31),
+            LocalDate.of(2027, 1, 2));
+
+    assertThat(view.days().get(0).starts()).hasSize(38);
+    assertThat(view.days().get(1).starts()).containsExactly(Instant.parse("2027-01-01T08:00:00Z"));
+    assertThat(view.days().get(2).starts()).isEmpty();
+  }
 }

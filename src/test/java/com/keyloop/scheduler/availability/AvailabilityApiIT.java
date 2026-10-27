@@ -35,11 +35,6 @@ class AvailabilityApiIT extends IntegrationTest {
     return LocalDate.now(ZoneOffset.UTC).plusDays(3).with(TemporalAdjusters.next(day));
   }
 
-  private static LocalDate nextJuly15() {
-    LocalDate today = LocalDate.now(ZoneOffset.UTC);
-    return LocalDate.of(today.getMonthValue() >= 7 ? today.getYear() + 1 : today.getYear(), 7, 15);
-  }
-
   private Response get(UUID dealership, String services, String from, String to) {
     return given()
         .headers(Headers.customer(Fixtures.ALICE_SUB))
@@ -51,23 +46,47 @@ class AvailabilityApiIT extends IntegrationTest {
 
   @Test
   void returnsStartsInUtc() {
-    LocalDate july = nextJuly15();
+    // Hudson opens 07:00 New York time, never 07:00 UTC: the offset must be applied in any season
+    LocalDate day = futureDay(DayOfWeek.TUESDAY);
+    Instant opening = day.atTime(7, 0).atZone(ZoneId.of("America/New_York")).toInstant();
 
     Response response =
-        get(Fixtures.RIVERSIDE, Fixtures.OIL_CHANGE.toString(), july.toString(), july.toString());
+        get(Fixtures.HUDSON, Fixtures.OIL_CHANGE.toString(), day.toString(), day.toString());
 
     response
         .then()
         .statusCode(200)
         .header("Cache-Control", "no-store")
-        .body("dealershipId", equalTo(Fixtures.RIVERSIDE.toString()))
-        .body("timeZone", equalTo("Europe/London"))
+        .body("dealershipId", equalTo(Fixtures.HUDSON.toString()))
+        .body("timeZone", equalTo("America/New_York"))
         .body("durationMinutes", equalTo(45))
         .body("days", hasSize(1))
-        .body("days[0].date", equalTo(july.toString()));
+        .body("days[0].date", equalTo(day.toString()));
     List<String> starts = response.jsonPath().getList("days[0].starts");
     assertThat(starts).isNotEmpty().allMatch(s -> s.endsWith("Z"));
-    assertThat(starts.get(0)).isEqualTo(july + "T07:00:00Z"); // 08:00 BST
+    assertThat(starts.get(0)).isEqualTo(opening.toString()).isNotEqualTo(day + "T07:00:00Z");
+  }
+
+  @Test
+  void startsBeyondSixtyDaysAreNotOffered() {
+    LocalDate today = LocalDate.now(ZoneOffset.UTC);
+    LocalDate from = today.plusDays(61);
+
+    get(Fixtures.SOLO, Fixtures.OIL_CHANGE.toString(), from.toString(), from.plusDays(2).toString())
+        .then()
+        .statusCode(200)
+        .body("days", hasSize(3))
+        .body("days[0].starts", empty())
+        .body("days[1].starts", empty())
+        .body("days[2].starts", empty());
+    get(
+            Fixtures.SOLO,
+            Fixtures.OIL_CHANGE.toString(),
+            today.plusDays(58).toString(),
+            today.plusDays(58).toString())
+        .then()
+        .statusCode(200)
+        .body("days[0].starts.size()", org.hamcrest.Matchers.greaterThan(0));
   }
 
   @Test

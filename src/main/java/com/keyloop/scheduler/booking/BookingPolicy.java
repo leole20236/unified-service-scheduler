@@ -12,6 +12,9 @@ public interface BookingPolicy {
   /** The earliest start this actor may book, given the current time. */
   Instant earliestStart(Instant now);
 
+  /** The latest start this actor may book, given the current time. */
+  Instant latestStart(Instant now);
+
   /** Validates a new booking; throws an {@code ApiException} on violation. */
   void checkNew(JobPlan plan, DealershipView d, Instant now);
 

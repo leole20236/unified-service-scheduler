@@ -21,8 +21,13 @@ public final class DispatcherBookingPolicy implements BookingPolicy {
   }
 
   @Override
+  public Instant latestStart(Instant now) {
+    return now.plus(PolicyChecks.MAX_AHEAD);
+  }
+
+  @Override
   public void checkNew(JobPlan plan, DealershipView d, Instant now) {
-    PolicyChecks.startWindow(plan, d, earliestStart(now), now);
+    PolicyChecks.startWindow(plan, d, earliestStart(now), latestStart(now));
     OpeningHours hours = PolicyChecks.hoursOrClosed(plan, d);
     TimeRange window = OpeningHoursCalendar.window(d, plan.localDate()).orElseThrow();
     Instant start = plan.period().start();

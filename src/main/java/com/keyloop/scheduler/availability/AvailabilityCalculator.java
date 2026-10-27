@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 
 /** Pure availability maths over a catalog and an occupancy snapshot (spec 9.3). */
 public final class AvailabilityCalculator {
@@ -60,17 +61,35 @@ public final class AvailabilityCalculator {
     return result;
   }
 
-  /** The nearest starts after the requested one, looking up to 14 days ahead. */
+  /**
+   * The nearest starts after the requested one, looking up to 14 days ahead and never past {@code
+   * latest}. Occupancy is fetched per dealership-local date, lazily: closed dates are never loaded
+   * and the search stops as soon as {@code limit} starts are found.
+   */
   public static List<OffsetDateTime> alternatives(
-      ResourceCatalog catalog, JobPlan plan, Occupancy occupancy, Instant earliest, int limit) {
+      ResourceCatalog catalog,
+      JobPlan plan,
+      Function<LocalDate, Occupancy> occupancyFor,
+      Instant earliest,
+      Instant latest,
+      int limit) {
     List<OffsetDateTime> result = new ArrayList<>();
     Instant requested = plan.period().start();
     for (int offset = 0; offset <= ALTERNATIVE_DAYS && result.size() < limit; offset++) {
       LocalDate date = plan.localDate().plusDays(offset);
+      Optional<TimeRange> window = OpeningHoursCalendar.window(catalog.dealership(), date);
+      if (window.isEmpty()) {
+        continue;
+      }
+      if (window.get().start().isAfter(latest)) {
+        break;
+      }
+      Occupancy occupancy = occupancyFor.apply(date);
       for (OffsetDateTime start :
           starts(
               catalog, plan.requiredSkills(), plan.durationMinutes(), date, occupancy, earliest)) {
-        if (start.toInstant().isAfter(requested) && result.size() < limit) {
+        Instant at = start.toInstant();
+        if (at.isAfter(requested) && !at.isAfter(latest) && result.size() < limit) {
           result.add(start);
         }
       }

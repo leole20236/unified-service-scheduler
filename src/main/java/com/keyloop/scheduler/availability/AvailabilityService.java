@@ -57,7 +57,10 @@ public class AvailabilityService {
             catalog,
             serviceTypeIds,
             from.atStartOfDay(catalog.dealership().zoneId()).toOffsetDateTime());
-    Instant earliest = BookingPolicy.forCaller(caller).earliestStart(clock.now());
+    BookingPolicy policy = BookingPolicy.forCaller(caller);
+    Instant now = clock.now();
+    Instant earliest = policy.earliestStart(now);
+    Instant latest = policy.latestStart(now);
     List<AvailabilityView.Day> result = new ArrayList<>();
     for (LocalDate date = from; !date.isAfter(to); date = date.plusDays(1)) {
       Occupancy occupied = occupancy.forDay(dealershipId, date, catalog.dealership());
@@ -66,6 +69,7 @@ public class AvailabilityService {
                   catalog, plan.requiredSkills(), plan.durationMinutes(), date, occupied, earliest)
               .stream()
               .map(OffsetDateTime::toInstant)
+              .filter(start -> !start.isAfter(latest))
               .toList();
       result.add(new AvailabilityView.Day(date, starts));
     }
