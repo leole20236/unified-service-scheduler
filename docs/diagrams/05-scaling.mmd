@@ -1,0 +1,36 @@
+flowchart TB
+    U["Users"]
+    DNS["Geo DNS"]
+    GW["API Gateway x N<br/>autoscaled on RPS"]
+    LB["Internal Load Balancer"]
+
+    subgraph HPA["Scheduler Deployment - HPA min 3 / max 30 per region"]
+        P1["pod"]
+        P2["pod"]
+        P3["pod"]
+        PN["pod ..."]
+    end
+
+    BOUNCER["PgBouncer<br/>transaction pooling"]
+    PRI[("PostgreSQL primary<br/>vertical scale")]
+    RPL[("Read replicas 2 to 6<br/>autoscale on CPU / lag")]
+    RED[("Redis cluster<br/>3 shards x 1 replica")]
+
+    U --> DNS
+    DNS --> GW
+    GW --> LB
+    LB --> P1
+    LB --> P2
+    LB --> P3
+    LB --> PN
+    P1 --> BOUNCER
+    P2 --> BOUNCER
+    P3 --> BOUNCER
+    PN --> BOUNCER
+    BOUNCER -->|writes| PRI
+    BOUNCER -->|reads| RPL
+    PRI -->|replication| RPL
+    P1 --> RED
+    P2 --> RED
+    P3 --> RED
+    PN --> RED

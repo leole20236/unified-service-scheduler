@@ -1,0 +1,58 @@
+# AI Collaboration & Decision Log — Unified Service Scheduler
+
+Running log of the design conversation between me (the engineer) and the AI agent
+(Claude Code + Superpowers `brainstorming` skill). Source material for the README
+"AI Collaboration Narrative" and the 5-minute presentation.
+
+## How I directed the AI
+
+- **Process guardrail:** used the Superpowers framework; the `brainstorming` skill has a
+  hard gate — no code, scaffolding or SQL until I approve a written design.
+- **Persona prompt:** asked the AI to act as a *strict, cynical Principal Distributed Systems
+  Engineer* and interrogate me on concurrency, bottlenecks, multi-region time, and IDOR.
+- **Grounding:** fed it the official Keyloop challenge PDF, then asked it to research real
+  dealership scheduling products (Keyloop Service Booking, Xtime, dispatch boards) so the
+  domain model and API match real workflows.
+- **My role:** I set direction and constraints; the AI challenged them, surfaced risks, and
+  proposed defaults that I accepted or overrode.
+
+## Decision log (my direction → AI challenge → resolution)
+
+| # | My direction | AI challenge / contribution | Resolution |
+|---|---|---|---|
+| 1 | Build from scratch, UI + BE integrated | Challenge PDF only requires **one** layer fully implemented; doing both doubles effort while grading weighs tests & AI verification | **Backend only** (REST API + DB + tests). UI = wireframes in design doc. Multi-region, auth, eventing = design only |
+| 2 | JWT login at the API Gateway; API only reads user headers | Trusting headers = anyone bypassing the gateway can impersonate any user | Service reachable only from private network / mTLS; gateway **strips client-supplied `X-User-*` headers**; API still enforces ownership & dealership scoping (anti-IDOR) |
+| 3 | Zero double-booking via PostgreSQL `EXCLUDE` constraint | Rejected Redis/Redlock locks (no fencing token ⇒ no guarantee). Proposed **partial** exclusion (`WHERE status NOT IN (CANCELLED, NO_SHOW)`) on both bay and technician ranges | DB is the single source of truth for correctness |
+| 4 | Redis to speed things up | Redis must never decide correctness | Redis = read cache only (availability, catalog, skills). Redis down ⇒ slower, never wrong |
+| 5 | Events for Reporting / Email; Kafka **or** SNS/SQS | Dual-write risk (DB commits, event lost) | **Transactional Outbox** + `EventPublisher` port with Kafka and SNS/SQS adapters (broker = design only) |
+| 6 | Read-heavy ⇒ use **CQRS** | Read side is eventually consistent; shown availability may be stale | Write side is authoritative: conflict ⇒ `409` + alternative slots |
+| 7 | DB read replicas | **Read-your-writes trap**: GET right after booking may hit a lagging replica ⇒ 404 | Commands return the full resource; "my appointments" reads go to primary |
+| 8 | Size it for a Keyloop-scale system | Researched: ~20,000 dealer sites, 100+ countries. Estimated peak ~400 writes/s, ~3,500 reads/s | Design target **~10k reads/s, ~1k writes/s** global. Writes are *not* the bottleneck (contention only within one dealership); reads are |
+| 9 | Load balancer + auto scaling | — | Geo DNS → Gateway → ALB → stateless pods (Kubernetes HPA on CPU + RPS); replicas scale on lag/CPU |
+| 10 | Logs to OpenSearch; everything runnable locally in Docker | OpenSearch needs ~1–2 GB RAM | Structured JSON logs (`traceId`, `dealershipId`, `appointmentId`) → Fluent Bit → OpenSearch + Dashboards, all in `docker compose` (with Postgres primary + replica, Redis) |
+| 11 | Local security scan with Snyk + code style checks | Snyk needs a (free) account + `snyk auth` | `snyk test` / `snyk code test` / `snyk container test`; OWASP Dependency-Check as account-free fallback; Checkstyle + Spotless fail the build |
+| 12 | Model it on real appointment systems | Research: Keyloop/Xtime flow = Vehicle → Services → Transport → Time → Confirm; capacity = technician hours + skills | Lifecycle `BOOKED → CHECKED_IN → IN_PROGRESS → ON_HOLD → COMPLETED` (+ `CANCELLED`, `NO_SHOW`); multi-service bookings. Transport/loaners, advisor capacity, pricing, clocking = design only |
+| 13 | Confirmed the ~10k reads/s, ~1k writes/s target; asked for a complete design | Offered 3 approaches: (A) logical CQRS + replicas + Redis cache-aside, (B) full CQRS with event-driven projections, (C) event sourcing — rejected C because `EXCLUDE` needs current-state tables; argued B is over-engineering at ~1k writes/s | **Approach A implemented; B documented as the evolution path** with explicit trigger thresholds (replica lag > 1 s, Gantt p99 > 200 ms) |
+| 14 | Reviewer agent found gaps: dispatcher flows (walk-in, overrun) blocked by customer rules; walk-in customers have no login | AI proposed per-actor booking policy and internal customer id + optional `idp_subject` | **Accepted**: `CustomerBookingPolicy` / `DispatcherBookingPolicy`; dispatchers can find/create customers + vehicles |
+| 15 | Hold slots in Redis like airline seats; "overlapping concurrent requests will kill the DB" | Pushed back on the claim: `EXCLUDE` conflicts wait milliseconds on one index entry then fail fast (no table lock, no deadlock cascade). Agreed the real risk is a hot-slot spike exhausting DB connections. Refused Redis as source of truth (failover, GC pause, crash between commit and cache update) | **Redis slot ledger + 10-min holds** via atomic Lua on one cluster slot (hash tag per dealership-day) rejects collisions in ~1 ms without touching the DB; **`EXCLUDE` stays the final authority**; ledger self-heals on conflict |
+| 16 | "Review again: no double booking, no inconsistency, no read/write risk, no performance hit" | Systematic race review found and fixed: deadlock from opposite lock order, parallel idempotent retries, concurrent status transitions, out-of-order events from parallel relays, GiST index growth | 16-row consistency review table in the design doc (§8.7), each risk with its mitigation and a test |
+| 17 | Each region should have its own primary DB cluster; route users to their region by JWT | Confirmed per-region clusters were already the design (diagram was unclear). Argued customers must route by the *dealership's* region, not the user's (travel case would hit the wrong database) and proposed JWT routing + a local dealership directory as a safety net | **Engineer's call: keep it simple.** Fully independent stack per region, routing by JWT `region` claim, gateway returns `421` on mismatch. Cross-region booking explicitly **deferred** as a documented out-of-scope case with a future path (directory + forward) |
+
+### AI-proposed defaults I accepted
+
+- Arbitrary-minute durations (no fixed slot grid) — `tstzrange` overlap handles it.
+- System auto-allocates bay + qualified technician (first-fit); customer does not pick.
+- No temporary hold; first commit wins, loser gets `409` + suggestions.
+- Customers are authenticated (no guest booking).
+- Dispatcher drag-and-drop = `PATCH` with `version` (optimistic locking) ⇒ `409` snaps back.
+- Store UTC `tstzrange` + dealership `zoneId`; API speaks dealership-local time with offset.
+- Each dealership has one **home region** (single writer); other regions route to it.
+- Java 21, Spring Boot 3, PostgreSQL 16, Redis, Flyway, Testcontainers, OpenAPI, Maven.
+
+## 5-minute talk track (draft)
+
+1. **Problem (30s)** — Scenario A: replace manual workshop booking; must allocate a bay *and* a qualified technician for the whole duration, with zero double-booking at global scale.
+2. **How I used AI (60s)** — Superpowers hard gate (design before code); cynical-principal persona to stress-test my ideas; grounded with the PDF + real-product research.
+3. **Key debates (2m)** — pick 3: `EXCLUDE` vs distributed locks (#3); gateway header trust vs IDOR (#2); CQRS + replicas vs read-your-writes (#6, #7).
+4. **Numbers drive design (45s)** — Keyloop-scale estimate (#8): reads dominate ⇒ CQRS, Redis, replicas; writes are cheap ⇒ simple DB constraint beats complex locking.
+5. **Verification & ownership (45s)** — Testcontainers concurrency tests on real Postgres, Checkstyle, Snyk, OpenSearch logs in local Docker demo.

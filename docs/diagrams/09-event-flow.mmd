@@ -1,0 +1,22 @@
+flowchart LR
+    TX["Booking transaction<br/>appointment + reservations + outbox row"]
+    OB[("outbox_event table")]
+    RL["Outbox relay<br/>FOR UPDATE SKIP LOCKED"]
+    PUB{"EventPublisher port"}
+    K["Kafka topic<br/>scheduler.appointments.v1<br/>key = dealershipId"]
+    SNS["SNS FIFO topic<br/>group = dealershipId"]
+    Q1["SQS FIFO email queue + DLQ"]
+    Q2["SQS FIFO reporting queue + DLQ"]
+    EM["Email / Notification"]
+    RP["Reporting"]
+    TX --> OB
+    OB --> RL
+    RL --> PUB
+    PUB -->|option A| K
+    PUB -->|option B| SNS
+    K --> EM
+    K --> RP
+    SNS --> Q1
+    SNS --> Q2
+    Q1 --> EM
+    Q2 --> RP

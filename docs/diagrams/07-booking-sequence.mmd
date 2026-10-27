@@ -1,0 +1,37 @@
+sequenceDiagram
+    autonumber
+    actor C as Customer app
+    participant GW as API Gateway
+    participant S as Scheduler service
+    participant R as Redis ledger
+    participant DB as PostgreSQL primary
+    participant MQ as Broker
+
+    C->>GW: GET availability (JWT)
+    GW->>S: forward + identity headers
+    S->>R: read ledger + catalog
+    S-->>C: free start times
+    C->>GW: POST /holds 09:00
+    GW->>S: forward
+    S->>R: Lua acquire_hold (atomic)
+    alt pair free
+        R-->>S: holdId, bay, technician
+        S-->>C: 201 held for 10 min
+    else all taken
+        R-->>S: none
+        S-->>C: 409 + alternatives (no DB call)
+    end
+    C->>GW: POST /appointments holdId + Idempotency-Key
+    GW->>S: forward
+    S->>DB: BEGIN, insert key, appointment, 2 reservations, outbox
+    alt EXCLUDE ok
+        DB-->>S: COMMIT
+        S->>R: hold to confirmed
+        S-->>C: 201 appointment
+    else 23P01 overlap
+        DB-->>S: ROLLBACK
+        S->>R: mark ledger dirty
+        S-->>C: 409 + alternatives
+    end
+    Note over S,MQ: Outbox relay publishes AppointmentBooked later
+    S--)MQ: AppointmentBooked

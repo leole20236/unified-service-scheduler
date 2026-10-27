@@ -1,0 +1,20 @@
+flowchart LR
+    DEV["Developer<br/>cURL / examples.http"]
+    subgraph COMPOSE["docker compose up"]
+        APP["scheduler :8080"]
+        PG1[("postgres-primary :5432")]
+        PG2[("postgres-replica :5433")]
+        RD[("redis :6379")]
+        FB["fluent-bit :24224"]
+        OS[("opensearch :9200")]
+        OSD["opensearch-dashboards :5601"]
+    end
+    DEV -->|identity headers by hand| APP
+    APP -->|writes| PG1
+    APP -->|reads| PG2
+    PG1 -->|replication| PG2
+    APP --> RD
+    APP -.->|docker log driver| FB
+    FB --> OS
+    OSD --> OS
+    DEV -->|browse logs| OSD

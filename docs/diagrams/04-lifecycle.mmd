@@ -1,0 +1,13 @@
+stateDiagram-v2
+    [*] --> BOOKED
+    BOOKED --> CHECKED_IN : dispatcher check-in
+    BOOKED --> CANCELLED : customer 24h+ before, or dispatcher
+    BOOKED --> NO_SHOW : start + 30 min grace
+    CHECKED_IN --> IN_PROGRESS : start work
+    CHECKED_IN --> CANCELLED : dispatcher
+    IN_PROGRESS --> ON_HOLD : waiting for parts
+    ON_HOLD --> IN_PROGRESS : resume
+    IN_PROGRESS --> COMPLETED : finish
+    COMPLETED --> [*]
+    CANCELLED --> [*]
+    NO_SHOW --> [*]

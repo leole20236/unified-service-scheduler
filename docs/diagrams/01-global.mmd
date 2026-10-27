@@ -1,0 +1,41 @@
+flowchart TB
+    B2C["Customer web / mobile"]
+    B2B["Dispatcher Gantt board"]
+    IDP[("Identity Provider<br/>JWT with region claim")]
+    DNS["Geo DNS / Global Load Balancer<br/>route by JWT region"]
+
+    subgraph EU["Region eu-west - fully independent"]
+        EUGW["API Gateway"]
+        EUSVC["Scheduler pods"]
+        EUDB[("PostgreSQL cluster<br/>primary + replicas")]
+        EURD[("Redis cluster")]
+        EUGW --> EUSVC
+        EUSVC --> EUDB
+        EUSVC --> EURD
+    end
+    subgraph US["Region us-east - fully independent"]
+        USGW["API Gateway"]
+        USSVC["Scheduler pods"]
+        USDB[("PostgreSQL cluster<br/>primary + replicas")]
+        USRD[("Redis cluster")]
+        USGW --> USSVC
+        USSVC --> USDB
+        USSVC --> USRD
+    end
+    subgraph AP["Region ap-southeast - fully independent"]
+        APGW["API Gateway"]
+        APSVC["Scheduler pods"]
+        APDB[("PostgreSQL cluster<br/>primary + replicas")]
+        APRD[("Redis cluster")]
+        APGW --> APSVC
+        APSVC --> APDB
+        APSVC --> APRD
+    end
+
+    B2C -.->|login| IDP
+    B2B -.->|login| IDP
+    B2C -->|JWT| DNS
+    B2B -->|JWT| DNS
+    DNS -->|region = eu| EUGW
+    DNS -->|region = us| USGW
+    DNS -->|region = ap| APGW

@@ -1,0 +1,36 @@
+flowchart LR
+    GW["API Gateway<br/>verify JWT, strip X-User-*<br/>inject identity headers, rate limit"]
+    ALB["Internal Load Balancer"]
+
+    subgraph K8S["Kubernetes cluster - HPA autoscaling"]
+        APP["Scheduler pods x N<br/>stateless<br/>command side + query side"]
+        RELAY["Outbox relay x 2"]
+    end
+
+    PG[("PostgreSQL primary<br/>EXCLUDE constraint")]
+    RR[("Read replicas x 2-6")]
+    RC[("Redis cluster<br/>slot ledger, holds, cache")]
+    DR[("Cross-region DR replica")]
+    MQ{{"Kafka or SNS to SQS"}}
+    EM["Email / Notification service"]
+    RP["Reporting service"]
+    FB["Fluent Bit"]
+    OS[("OpenSearch + Dashboards")]
+    PROM[("Prometheus / Grafana")]
+    OTEL[("OpenTelemetry / Tempo")]
+
+    GW --> ALB
+    ALB --> APP
+    APP -->|commands: write| PG
+    APP -->|queries: read| RR
+    APP <-->|holds + cache| RC
+    PG -->|streaming replication| RR
+    PG -.->|async| DR
+    RELAY -->|poll outbox| PG
+    RELAY -->|publish events| MQ
+    MQ --> EM
+    MQ --> RP
+    APP -.->|JSON logs| FB
+    FB --> OS
+    APP -.->|metrics| PROM
+    APP -.->|traces| OTEL

@@ -1,0 +1,21 @@
+flowchart LR
+    subgraph WRITE["Write path - correctness"]
+        W1["Command API"]
+        W2["Redis hold<br/>fast reject"]
+        W3[("Primary<br/>EXCLUDE = final judge")]
+        W4["Outbox"]
+        W1 --> W2
+        W2 --> W3
+        W3 --> W4
+    end
+    subgraph READ["Read path - speed"]
+        R1["Query API"]
+        R2[("Redis<br/>ledger + catalog")]
+        R3[("Read replicas<br/>Gantt, lists")]
+        R4[("Primary<br/>my appointments")]
+        R1 --> R2
+        R1 --> R3
+        R1 --> R4
+    end
+    W3 -->|replication| R3
+    W3 -->|write-through after commit| R2

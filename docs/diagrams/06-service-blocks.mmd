@@ -1,0 +1,52 @@
+flowchart TB
+    subgraph API["API layer"]
+        F1["Identity header filter<br/>X-User-Id, X-User-Roles, X-Dealership-Ids"]
+        F2["Dealership guard + role check"]
+        C1["Customer controllers<br/>/me, /holds, /appointments"]
+        C2["Dispatcher controllers<br/>/dealerships/d/..."]
+        EH["Problem+JSON error handler"]
+    end
+    subgraph CMD["Command side - writes"]
+        BP["BookingPolicy<br/>Customer / Dispatcher"]
+        HS["HoldService<br/>Redis Lua"]
+        AS["AllocationService<br/>rank bay + technician"]
+        BS["BookingService<br/>book, reschedule, transitions, blocks"]
+        IK["Idempotency"]
+        OW["Outbox writer"]
+    end
+    subgraph QRY["Query side - reads"]
+        AV["AvailabilityService"]
+        GS["ScheduleService - Gantt"]
+        LS["Appointment queries"]
+    end
+    subgraph INF["Infrastructure"]
+        PRIMARY[("Primary DataSource")]
+        REPLICA[("Replica DataSource")]
+        REDIS[("Redis: ledger, holds, catalog")]
+        PUB["EventPublisher<br/>Logging / Kafka / SNS-SQS"]
+        RELAY["Outbox relay"]
+    end
+    F1 --> F2
+    F2 --> C1
+    F2 --> C2
+    C1 --> HS
+    C1 --> BS
+    C1 --> AV
+    C1 --> LS
+    C2 --> BS
+    C2 --> GS
+    C2 --> LS
+    BS --> BP
+    BS --> AS
+    BS --> IK
+    BS --> OW
+    HS --> REDIS
+    AS --> REDIS
+    BS --> PRIMARY
+    OW --> PRIMARY
+    AV --> REDIS
+    GS --> REPLICA
+    LS --> PRIMARY
+    LS --> REPLICA
+    RELAY --> PRIMARY
+    RELAY --> PUB

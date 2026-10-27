@@ -1,0 +1,1092 @@
+# Unified Service Scheduler — System Design Document
+
+| | |
+|---|---|
+| **Scenario** | Keyloop Technical Assessment — Scenario A: The Unified Service Scheduler |
+| **Status** | Draft for approval |
+| **Date** | 2026-10-27 |
+| **Implemented layer** | Backend (REST API + PostgreSQL + Redis). Everything else is design-only. |
+| **Companion** | [`docs/ai-collaboration/decision-log.md`](../../ai-collaboration/decision-log.md) — every decision below, with the debate that produced it |
+
+---
+
+## 1. Intent
+
+Car dealership workshops still book service work by phone and paper diaries. Two audiences
+need one system:
+
+- **B2C customers** book predefined service packages (e.g. Oil Change 45 min, Brake
+  Inspection 75 min) for their vehicle at a chosen dealership and time — 24/7, in about two
+  minutes, like Keyloop Service Booking or Xtime.
+- **B2B workshop dispatchers** run the day on a live Gantt timeline of service bays and
+  technicians: check vehicles in, move jobs by drag-and-drop, react to overruns.
+
+The backend must allocate **one service bay and one qualified technician for the entire
+service duration**, persist a confirmed `Appointment`, and **never double-book** a bay or a
+technician — under concurrent traffic from many app instances, across a global footprint.
+
+## 2. Goals, non-goals, anti-goals
+
+**Goals**
+1. Fulfil the three core requirements: resource-constrained booking; real-time availability
+   check of bay **and** qualified technician for the full duration; persistent appointment
+   record linking customer, vehicle, technician and bay.
+2. Zero double-booking guaranteed by the database, not by application code or locks.
+3. Read-heavy scaling (CQRS split, Redis, read replicas) sized for a Keyloop-scale estate.
+4. Complete, production-shaped design for the parts not coded: UI, auth, multi-region,
+   event streaming, autoscaling.
+5. Runs end-to-end locally with one `docker compose up`, with logs searchable in OpenSearch.
+
+**Non-goals (design-only or out of scope)**
+- Frontend code (wireframes only, §15).
+- Identity provider, login and JWT validation (gateway concern, §11).
+- Message broker deployment, consumers (Email, Reporting) (§10).
+- Multi-region deployment (§12) and Kubernetes manifests (§13).
+- Pricing/upsell, courtesy-car/shuttle capacity, service-advisor capacity, technician
+  clocking, parts — named in the domain (§6.6) so the design leaves room for them.
+
+**Anti-goals (failure even if it "works")**
+- Any path where two active appointments overlap on one bay or one technician.
+- Correctness that depends on Redis, a distributed lock, or clock agreement between servers.
+- A customer seeing or changing another customer's data by guessing an ID (IDOR).
+- A design so elaborate the core booking path can't be tested end-to-end locally.
+
+## 3. Assumptions
+
+The challenge says to make reasonable assumptions and document them. These are ours:
+
+| # | Assumption |
+|---|---|
+| A1 | Durations are arbitrary minutes (no fixed slot grid). The UI offers 15-minute start steps; the API accepts any minute. |
+| A2 | A booking may contain several service types; they run back-to-back as **one** job in **one** bay with **one** technician who holds **all** required skills. Duration = sum. |
+| A3 | The customer does not choose the technician or bay; the system allocates. Dispatchers may override. |
+| A4 | Customers are authenticated (no guest bookings). Identity arrives as gateway-injected headers. |
+| A5 | Airline-style **slot hold**: the chosen bay + technician are held in Redis for 10 minutes while the customer confirms (§8.6). Max one active hold per customer per dealership. The database remains the final authority. |
+| A6 | Technicians work the dealership's opening hours unless blocked (leave, training). Bays are available during opening hours unless blocked (maintenance). Shift rosters are design-only. |
+| A7 | Each dealership has a configurable **bay turnaround buffer** (default 0 min) added after a job on the bay only. |
+| A8 | Every dealership, its customers and dispatchers belong to exactly one **region**; each region is a fully independent stack with its own database cluster. Requests are routed by the `region` claim in the JWT. Cross-region use (e.g. a customer booking abroad) is out of scope for this version (§12.4). |
+| A9 | Booking rules differ per actor (§6.4): customers book `now + 2h` … 60 days ahead and may change/cancel until 24h before start; dispatchers can book walk-ins from `now − 15 min`, let jobs run past closing, and change any non-terminal job. |
+| A11 | Walk-in / phone customers may have no login account. `customer.id` is an internal UUID; `idp_subject` links a login account when one exists (linking on later sign-up via verified email is design-only). |
+| A10 | Reference data (dealerships, bays, technicians, skills, service types) is seeded via migrations for the demo; admin CRUD APIs are design-only. |
+
+## 4. Capacity estimate
+
+Keyloop reports ~20,000 dealer sites in 100+ countries; one dealer group (Wilsons) reports
+~500 online bookings/month. Our estimate:
+
+| Metric | Derivation | Value |
+|---|---|---|
+| Bookings/day | 20k sites × ~1,000 bookings/month ÷ 30 | ~670k/day (~8/s average) |
+| Peak writes | ×10 business-hour concentration × ~5 writes per booking lifecycle | ~400 writes/s |
+| Availability reads | look-to-book ≈ 20:1, ×10 peak | ~1,500 reads/s |
+| Dispatcher board reads | ~60k dispatchers refreshing every 30 s | ~2,000 reads/s |
+| **Design target (×2–3 headroom)** | | **~10,000 reads/s, ~1,000 writes/s global** |
+
+**Consequences**
+- Writes are cheap. Contention only ever happens *inside one dealership* (a handful of
+  requests per second at most), so a database exclusion constraint is ample; no
+  sharded locking service is needed.
+- Reads dominate ⇒ separate read path, cache, replicas (§9).
+- Split over ~3 regions ⇒ ~3.3k reads/s and ~330 writes/s per region: one PostgreSQL
+  primary + 2–3 replicas + a small Redis cluster per region.
+
+## 5. Architecture
+
+### 5.1 Global view
+
+![Global architecture](../../diagrams/01-global.png)
+
+<sub>Source: [`docs/diagrams/01-global.mmd`](../../diagrams/01-global.mmd)</sub>
+
+Each region is a **fully independent stack** — its own gateway, scheduler pods, PostgreSQL
+cluster (primary + replicas) and Redis. Regions share no data and never talk to each other
+at request time. The identity provider puts a `region` claim in the JWT (the user's
+region: sign-up region for customers, their dealerships' region for dispatchers), and the
+global load balancer routes each request to that region.
+
+### 5.2 Regional view (the part we implement is the Scheduler Service)
+
+![Regional architecture](../../diagrams/02-regional.png)
+
+<sub>Source: [`docs/diagrams/02-regional.mmd`](../../diagrams/02-regional.mmd)</sub>
+
+### 5.3 Components
+
+| Component | Role | Built? |
+|---|---|---|
+| Geo DNS / Global LB | Latency-based routing to nearest region; health-checked failover | Design |
+| Identity Provider | OIDC login, issues short-lived JWT (15 min) + refresh token | Design |
+| API Gateway | Verifies JWT signature/expiry/audience and that its `region` claim matches this region (else `421 Misdirected Request`); **removes** any client-sent `X-User-*` headers; injects identity headers (§11); rate limits; adds `X-Request-Id`/`traceparent` | Design |
+| Internal ALB | Spreads traffic across stateless scheduler pods | Design (local: none, single app) |
+| **Scheduler Service** | Spring Boot app: command side (booking, reschedule, transitions), query side (availability, Gantt, my appointments), outbox writer | **Built** |
+| **PostgreSQL primary** | System of record; `EXCLUDE` constraints enforce zero double-booking | **Built** |
+| **Read replica(s)** | Serve query-side reads | **Built** (one replica in Docker) |
+| **Redis** | Cache-aside for catalog and per-dealership-day occupancy; never source of truth | **Built** |
+| **Outbox + relay** | Same-transaction event capture; relay publishes to broker | Outbox table + relay with logging publisher **built**; Kafka/SNS adapters design |
+| Broker, Email, Reporting | Downstream consumers | Design |
+| Fluent Bit → OpenSearch | Centralised structured logs | **Built** (Docker) |
+| Prometheus, OTel | Metrics and tracing | App exposes `/actuator/prometheus` + OTel instrumentation; backends design |
+
+### 5.4 Inside the Scheduler Service (block diagram)
+
+![Scheduler service internal blocks](../../diagrams/06-service-blocks.png)
+
+<sub>Source: [`docs/diagrams/06-service-blocks.mmd`](../../diagrams/06-service-blocks.mmd)</sub>
+
+## 6. Domain model and business rules
+
+### 6.1 Entities
+
+![Entity relationship diagram](../../diagrams/03-erd.png)
+
+<sub>Source: [`docs/diagrams/03-erd.mmd`](../../diagrams/03-erd.mmd)</sub>
+
+- **Dealership** — `zoneId` (IANA, e.g. `Europe/London`), `homeRegion`, `bayBufferMinutes`.
+- **ServiceType** — global catalog: `code`, `name`, `durationMinutes`, `requiredSkill`.
+  `DealershipService` says which dealerships offer it (optional per-dealership duration override).
+- **Technician** — belongs to one dealership; holds skills.
+- **ServiceBay** — belongs to one dealership.
+- **Customer** — internal UUID. `idp_subject` (nullable, unique) = `X-User-Id` for customers
+  with a login; a self-service customer's profile is created on first use. Dispatchers can
+  create customers without a login (walk-in / phone) — A11.
+- **Vehicle** — owned by a customer: VIN (unique per owner), registration, make, model, year, mileage.
+- **Appointment** — the confirmed record (requirement 3): customer, vehicle, dealership,
+  bay, technician, services, period, status, version.
+- **ResourceReservation** — one row per resource an appointment (or a block) occupies.
+  This is where double-booking is made impossible (§8).
+
+### 6.2 Appointment lifecycle
+
+![Appointment lifecycle](../../diagrams/04-lifecycle.png)
+
+<sub>Source: [`docs/diagrams/04-lifecycle.mmd`](../../diagrams/04-lifecycle.mmd)</sub>
+
+| Transition | Effect on reservations |
+|---|---|
+| → `CANCELLED`, → `NO_SHOW` | Reservations set `active = false` ⇒ time is released immediately. Row kept for audit/reporting. |
+| → `COMPLETED` before planned end | Reservation end is shrunk to completion time ⇒ remaining time released. |
+| `ON_HOLD` | Reservations kept (bay is physically occupied). Dispatcher may move/resize. |
+| Overrun (`IN_PROGRESS` past planned end) | Not auto-extended. Gantt shows overrun; dispatcher extends via resize, which can conflict ⇒ dispatcher resolves by moving later jobs. |
+
+Any transition not in the diagram ⇒ `409 INVALID_TRANSITION`.
+
+### 6.3 Booking rules (validation order)
+
+Customer booking, in order. Dispatcher differences are in §6.4.
+
+1. Caller is a `CUSTOMER` and owns `vehicleId` (else `404`, see §11.3).
+2. Dealership exists and offers every requested service; 1–5 services, no duplicates.
+3. `start` is within the booking window (A9); compared using **database time** (§12.3).
+4. Duration = Σ service durations. Period `[start, start + duration)` lies inside one day's
+   opening hours in the dealership's zone (no overnight jobs) ⇒ else `422 OUTSIDE_OPENING_HOURS`.
+5. Allocate a bay + technician (§8.3) ⇒ else `409 SLOT_UNAVAILABLE` with up to 5 alternatives.
+
+### 6.4 Rules per actor (booking, reschedule, cancel)
+
+Implemented as one `BookingPolicy` interface with `CustomerBookingPolicy` and
+`DispatcherBookingPolicy`; the allocation and persistence code is shared.
+
+| Rule | Customer | Dispatcher |
+|---|---|---|
+| Earliest start | DB `now() + 2h` | DB `now() − 15 min` (walk-in) |
+| Latest start | 60 days ahead | 60 days ahead |
+| Opening hours | Whole job inside one day's opening hours | **Start** inside opening hours; **end may pass closing** (overtime / overrun) |
+| Start granularity | Any minute (UI offers 15-min steps) | Any minute |
+| Change / cancel window | Own `BOOKED` jobs, until 24h before start; reschedule re-allocates resources via a new hold | Any non-terminal job, no time cutoff |
+| `CHECKED_IN` | — | Move time, change bay/technician, resize |
+| `IN_PROGRESS` / `ON_HOLD` | — | Start is fixed; may change bay/technician or extend/shrink the end |
+| Choose resources | No (system allocates) | Optional: pin bay and/or technician (technician must hold all required skills ⇒ else `422 TECHNICIAN_NOT_QUALIFIED`) |
+| Other | — | Status transitions; book for a customer (phone/walk-in), create customer + vehicle inline; create/remove resource blocks |
+
+### 6.5 Resource blocks
+
+Dispatchers block a bay (maintenance) or technician (leave, training) for a period. Blocks
+are `ResourceReservation` rows with `kind = BLOCK`, so the same constraint stops a block
+overlapping an appointment and vice versa. Creating a block over existing appointments fails
+with `409` listing the conflicts — the dispatcher moves those first.
+
+### 6.6 Design-only domain extensions
+
+Shaped so they slot in later without reworking the core:
+
+- **Transport options** (wait, drop-off, courtesy car, shuttle): courtesy cars become another
+  reservable resource type ⇒ one more reservation row per booking, same constraint.
+- **Service-advisor capacity**: a per-dealership "check-ins per 15 min" counter resource.
+- **Pricing & upsell**: price on `DealershipService`; appointment stores a price snapshot.
+- **Technician clocking & shift rosters**: rosters become `AVAILABLE` windows; clocking feeds
+  actual vs. estimated time to Reporting.
+
+## 7. Data model (PostgreSQL 16)
+
+Schema sketch — the builder owns final DDL and Flyway migrations.
+
+```sql
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+
+CREATE TABLE dealership (
+  id                 uuid PRIMARY KEY,
+  name               text NOT NULL,
+  zone_id            text NOT NULL,            -- IANA zone, validated by app
+  home_region        text NOT NULL,
+  bay_buffer_minutes int  NOT NULL DEFAULT 0 CHECK (bay_buffer_minutes BETWEEN 0 AND 60)
+);
+
+CREATE TABLE opening_hours (
+  dealership_id uuid REFERENCES dealership(id),
+  day_of_week   smallint CHECK (day_of_week BETWEEN 1 AND 7),  -- ISO, Monday = 1
+  opens_at      time NOT NULL,
+  closes_at     time NOT NULL CHECK (closes_at > opens_at),
+  PRIMARY KEY (dealership_id, day_of_week)
+);
+
+CREATE TABLE skill        (code text PRIMARY KEY, name text NOT NULL);
+CREATE TABLE service_type (id uuid PRIMARY KEY, code text UNIQUE NOT NULL, name text NOT NULL,
+                           duration_minutes int NOT NULL CHECK (duration_minutes BETWEEN 5 AND 600),
+                           required_skill text NOT NULL REFERENCES skill(code));
+CREATE TABLE dealership_service (dealership_id uuid REFERENCES dealership(id),
+                                 service_type_id uuid REFERENCES service_type(id),
+                                 duration_override_minutes int,
+                                 PRIMARY KEY (dealership_id, service_type_id));
+
+CREATE TABLE service_bay (id uuid PRIMARY KEY, dealership_id uuid NOT NULL REFERENCES dealership(id),
+                          name text NOT NULL, active boolean NOT NULL DEFAULT true);
+CREATE TABLE technician  (id uuid PRIMARY KEY, dealership_id uuid NOT NULL REFERENCES dealership(id),
+                          display_name text NOT NULL, active boolean NOT NULL DEFAULT true);
+CREATE TABLE technician_skill (technician_id uuid REFERENCES technician(id),
+                               skill_code text REFERENCES skill(code),
+                               PRIMARY KEY (technician_id, skill_code));
+
+CREATE TABLE customer (id uuid PRIMARY KEY,                 -- internal id
+                       idp_subject uuid UNIQUE,              -- = X-User-Id when the customer has a login; NULL for walk-ins
+                       display_name text NOT NULL, email text, phone text,
+                       created_by uuid NOT NULL,             -- self or dispatcher
+                       created_at timestamptz NOT NULL DEFAULT now());
+CREATE INDEX ON customer (lower(email));
+CREATE INDEX ON customer (phone);
+CREATE TABLE vehicle  (id uuid PRIMARY KEY, customer_id uuid NOT NULL REFERENCES customer(id),
+                       vin char(17) NOT NULL, registration text, make text, model text,
+                       model_year smallint, mileage int,
+                       UNIQUE (customer_id, vin));
+
+CREATE TABLE appointment (
+  id             uuid PRIMARY KEY,                 -- UUIDv7 (time-ordered)
+  dealership_id  uuid NOT NULL REFERENCES dealership(id),
+  customer_id    uuid NOT NULL REFERENCES customer(id),
+  vehicle_id     uuid NOT NULL REFERENCES vehicle(id),
+  service_bay_id uuid NOT NULL REFERENCES service_bay(id),
+  technician_id  uuid NOT NULL REFERENCES technician(id),
+  period         tstzrange NOT NULL CHECK (NOT isempty(period) AND lower_inc(period) AND NOT upper_inc(period)),
+  local_start    timestamp NOT NULL,               -- wall-clock start in dealership zone (§12.2)
+  status         text NOT NULL,                    -- BOOKED | CHECKED_IN | IN_PROGRESS | ON_HOLD | COMPLETED | CANCELLED | NO_SHOW
+  version        bigint NOT NULL DEFAULT 0,        -- optimistic locking
+  customer_notes text,
+  created_by     uuid NOT NULL,
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  updated_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ON appointment (dealership_id, lower(period));
+CREATE INDEX ON appointment (customer_id, lower(period) DESC);
+
+CREATE TABLE appointment_service (appointment_id uuid REFERENCES appointment(id),
+                                  service_type_id uuid REFERENCES service_type(id),
+                                  position smallint NOT NULL,
+                                  duration_minutes int NOT NULL,   -- snapshot at booking
+                                  PRIMARY KEY (appointment_id, service_type_id));
+
+-- The zero-double-booking table
+CREATE TABLE resource_reservation (
+  id             uuid PRIMARY KEY,
+  dealership_id  uuid NOT NULL,
+  resource_type  text NOT NULL CHECK (resource_type IN ('BAY','TECHNICIAN')),
+  resource_id    uuid NOT NULL,                    -- bay or technician id (UUIDs never collide across types)
+  appointment_id uuid REFERENCES appointment(id),  -- NULL for blocks
+  kind           text NOT NULL CHECK (kind IN ('APPOINTMENT','BLOCK')),
+  period         tstzrange NOT NULL,
+  active         boolean NOT NULL DEFAULT true,
+  reason         text,                             -- for blocks
+  CONSTRAINT no_double_booking
+    EXCLUDE USING gist (resource_id WITH =, period WITH &&) WHERE (active)
+);
+CREATE INDEX ON resource_reservation (dealership_id, period) WHERE active;
+-- Archival job deletes reservations whose period ended > 30 days ago (the appointment row
+-- keeps the history), so the GiST index only holds recent + future rows and stays small.
+
+CREATE TABLE outbox_event (
+  id             uuid PRIMARY KEY,
+  aggregate_type text NOT NULL,
+  aggregate_id   uuid NOT NULL,
+  dealership_id  uuid NOT NULL,                    -- partition / ordering key
+  event_type     text NOT NULL,
+  payload        jsonb NOT NULL,
+  occurred_at    timestamptz NOT NULL DEFAULT now(),
+  published_at   timestamptz
+);
+CREATE INDEX ON outbox_event (occurred_at) WHERE published_at IS NULL;
+
+CREATE TABLE idempotency_key (
+  key           text NOT NULL,
+  user_id       uuid NOT NULL,
+  request_hash  text NOT NULL,
+  response_code int,
+  response_body jsonb,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, key)
+);
+```
+
+Why one `resource_reservation` table rather than constraints on `appointment`: a single
+constraint covers bays, technicians, blocks, the bay buffer and future resource types
+(courtesy cars) uniformly. `tstzrange` is half-open `[)`, so back-to-back jobs
+(09:00–09:45, 09:45–11:00) are legal.
+
+## 8. Concurrency control — zero double-booking
+
+### 8.1 The guarantee
+
+`no_double_booking` makes it **physically impossible** for two active reservations on the
+same resource to overlap, regardless of how many app instances race. PostgreSQL checks the
+GiST exclusion index at insert/update; a concurrent conflicting transaction blocks on the
+index entry and then fails with SQLSTATE `23P01 exclusion_violation`. No application lock,
+no Redis lock, no `SERIALIZABLE` needed; `READ COMMITTED` is enough.
+
+### 8.2 Why not the alternatives
+
+| Option | Verdict |
+|---|---|
+| Check-then-insert in app code | Race between check and insert ⇒ double-booking. Rejected. |
+| Redis / Redlock distributed lock | No fencing token ⇒ a paused process can write after its lock expired. Not a guarantee. Rejected. |
+| `SELECT … FOR UPDATE` on a per-dealership row | Correct, but serialises every booking in a dealership even when resources don't overlap; also needs care across 2 resources. Kept as a fallback idea only. |
+| Fixed 15-min slot table with unique `(resource, slot)` | Correct, but forces a grid, multiplies rows (75 min = 5 rows × 2 resources), awkward for resize. Rejected given A1. |
+| `SERIALIZABLE` isolation | Correct but higher abort rates and harder reasoning. Unneeded. |
+| **`EXCLUDE` on `tstzrange`** | Correct, lock-free from the app's view, arbitrary durations, one constraint for all resource types. **Chosen.** |
+
+### 8.3 Allocation and persistence (`POST /appointments`)
+
+Normal customer path: the pair was already chosen and held in Redis (§8.6), so this runs
+**once** with that pair. The candidate loop below is the **direct path**, used when no
+hold is given (dispatcher bookings, API clients, Redis unavailable).
+
+```
+validate (§6.3 / §6.4 policy)
+period    = [start, start + Σduration)
+bayPeriod = [start, start + Σduration + bayBufferMinutes)
+
+candidates = query on PRIMARY:
+  technicians in dealership, active, holding ALL required skills,
+      with no active reservation overlapping period
+  bays in dealership, active,
+      with no active reservation overlapping bayPeriod
+rank technicians by booked minutes that day (least-loaded first), tie → random
+rank bays by random  (spreads concurrent requests over different pairs ⇒ fewer collisions)
+
+for attempt in 1..3 (pairs taken in rank order):
+    BEGIN (READ COMMITTED)
+      INSERT idempotency_key (IN_PROGRESS)       -- first: a concurrent duplicate blocks here (§8.5)
+      INSERT appointment, appointment_service rows
+      INSERT both reservations, ordered by resource_id   -- fixed lock order ⇒ no deadlocks (§8.7)
+      INSERT outbox_event AppointmentBooked
+      UPDATE idempotency_key SET response
+    COMMIT
+    on 23P01 → ROLLBACK, drop the conflicting resource from candidates,
+               mark the Redis ledger for that dealership-day dirty (§8.6), next attempt
+    on success → after-commit: write-through ledger (hold → confirmed); return 201
+
+if no pair succeeded → 409 SLOT_UNAVAILABLE + alternatives (§9.3)
+```
+
+The bay and technician reservations are inserted **in one transaction**, so there is never a
+state where the bay is taken but the technician is not.
+
+### 8.4 Dispatcher moves (drag-and-drop) — optimistic locking
+
+Before touching the database the target interval is checked against the Redis ledger
+(§8.6): overlap with a customer's live hold ⇒ `409 SLOT_HELD`, unless the request says
+`"overrideHold": true` (the hold is revoked; that customer's confirm will get `409`).
+
+`PATCH` carries `If-Match: "<version>"`. In one transaction:
+
+```
+UPDATE appointment SET ..., version = version + 1
+ WHERE id = :id AND dealership_id = :d AND version = :expected      -- 0 rows ⇒ 412 VERSION_CONFLICT
+UPDATE resource_reservation SET resource_id = ..., period = ...
+ WHERE appointment_id = :id AND active                               -- 23P01 ⇒ 409 SLOT_UNAVAILABLE
+INSERT outbox_event AppointmentRescheduled
+```
+
+Two dispatchers dragging the same job: the second gets `412` and the UI snaps the card
+back and refreshes. A dispatcher dragging onto a slot a customer just booked: `409`,
+snap back, the response names the conflicting appointment.
+
+**Status transitions** are a single conditional statement, so two concurrent actions
+(e.g. check-in vs. cancel) cannot both succeed:
+
+```
+UPDATE appointment SET status = :to, version = version + 1
+ WHERE id = :id AND dealership_id = :d AND status = ANY(:allowedFrom)   -- 0 rows ⇒ 409 INVALID_TRANSITION
+```
+
+Customer cancel uses the same statement with `allowedFrom = {BOOKED}` and the 24h check
+against DB `now()` in the `WHERE` clause.
+
+### 8.5 Idempotency
+
+`POST /appointments` (customer and dispatcher) requires an `Idempotency-Key` header. A
+retry with the same key and same body returns the stored response; same key with a
+different body ⇒ `422 IDEMPOTENCY_KEY_REUSED`. Keys expire after 24h (cleanup job). This
+stops a flaky mobile connection from creating two bookings.
+
+The key row is the **first** insert of the booking transaction. Two identical requests
+arriving together: the second blocks on the primary-key index until the first commits,
+gets `unique_violation`, rolls back and returns the first one's stored response (or `409
+REQUEST_IN_PROGRESS` if the first rolled back mid-flight and the client should retry).
+
+### 8.6 Slot holds in Redis (airline-style)
+
+![Booking sequence: hold then confirm](../../diagrams/07-booking-sequence.png)
+
+<sub>Source: [`docs/diagrams/07-booking-sequence.mmd`](../../diagrams/07-booking-sequence.mmd)</sub>
+
+Two jobs: **UX** — the slot the customer picked is theirs for 10 minutes while they review;
+**contention shield** — competing requests for a hot slot are rejected in Redis in ~1 ms and
+never reach PostgreSQL, so a promotion spike cannot exhaust database connections.
+
+**Slot ledger.** All keys for one dealership-day share the hash tag
+`{d:<dealershipId>:<localDate>}`, so they live in one Redis Cluster slot and one Lua script
+can read and write them atomically:
+
+| Key | Type | Content |
+|---|---|---|
+| `ledger:{…}:<resourceId>` | sorted set | intervals on that bay/technician; member `R:<reservationId>:<startMs>:<endMs>` (confirmed, mirrored from DB) or `H:<holdId>:<startMs>:<endMs>:<expiresMs>` (hold); score = start |
+| `hold:{…}:<holdId>` | hash, TTL 10 min | `userId`, `technicianId`, `bayId`, period, service ids, `expiresAt` |
+| `userhold:{…}:<userId>` | string, TTL 10 min | the user's current hold id (one hold per user per dealership-day) |
+| `ledger-loaded:{…}` | string, TTL 10 min | marker; missing ⇒ ledger rebuilt from the **primary** (one indexed query) before use |
+
+**`POST /holds`**
+1. Validate with the caller's policy (§6.3 rules 1–4). No DB write.
+2. Ensure the ledger is loaded.
+3. Lua `acquire_hold`: take time from Redis `TIME` (one clock); drop expired `H` members of
+   the touched sets; release the caller's previous hold; walk the ranked technician × bay
+   pairs (§8.3 ranking, catalog from cache) and take the first pair where neither sorted
+   set overlaps the requested interval; add `H` members to both sets and create the hold.
+4. Pair found ⇒ `201 { holdId, expiresAt, start, end }`. None ⇒ `409 SLOT_UNAVAILABLE` +
+   alternatives computed from the ledger. **No database access in either case.**
+
+**Confirm** — `POST /appointments` with `holdId`:
+1. Hold must belong to the caller and match the request body (else `404` / `422`).
+2. Database transaction (§8.3) with the held pair — `EXCLUDE` is the final check.
+3. After commit, Lua turns the `H` members into `R` members and deletes the hold.
+4. If the hold had expired: the insert is still attempted — free slot ⇒ `201`; taken ⇒ `409`.
+
+**Write-through.** Every other committed change to reservations (dispatcher move, cancel,
+block, early completion) updates the ledger after commit. Any `23P01` from the database
+deletes `ledger-loaded:{…}`, so the next request rebuilds that dealership-day from the
+primary — the ledger heals itself.
+
+**Why Redis can never cause a double booking**
+
+| Failure | Outcome |
+|---|---|
+| Redis failover loses recent holds / ledger entries | Next request may hold an already-taken pair ⇒ `EXCLUDE` rejects at confirm ⇒ `409`, ledger rebuilt. Never two bookings. |
+| App crashes between DB commit and ledger update | Ledger misses one `R` entry ⇒ same as above until self-heal or the 10-min marker TTL. |
+| Process pauses (GC) past hold TTL | Hold expires; the database still decides. |
+| Redis completely down | `POST /holds` ⇒ `503`; client books via the direct path (§8.3); availability is computed from the database. Slower, still correct. |
+| Hold hoarding (one user blocking many slots) | One hold per user per dealership-day; gateway rate limit on `/holds`. |
+
+### 8.7 Consistency and race review
+
+Every write path checked against: double booking, inconsistent data, read/write races,
+performance.
+
+| # | Risk | Mitigation |
+|---|---|---|
+| 1 | Two requests book overlapping time on one bay/technician | `EXCLUDE` on `resource_reservation` (§8.1); Redis hold filters most collisions earlier (§8.6) |
+| 2 | Bay taken but technician not (partial booking) | Both reservations, appointment and outbox in **one** transaction |
+| 3 | `appointment.period` disagrees with its reservations | Only changed together in one transaction by one repository method; integration test asserts the invariant after every command |
+| 4 | Deadlock: two transactions update the same two resources in opposite order | Reservations always inserted/updated **ordered by `resource_id`**; any remaining `40P01` is retried once |
+| 5 | Lost update: two dispatchers move the same job | `If-Match` version ⇒ `412` |
+| 6 | Conflicting status changes (check-in vs. cancel) | Conditional `UPDATE … WHERE status = ANY(:allowedFrom)` (§8.4) |
+| 7 | Duplicate booking from client retry | Idempotency key as first insert (§8.5) |
+| 8 | State committed but event lost, or event without commit | Transactional outbox (§10) |
+| 9 | Events of one dealership published out of order by parallel relays | Every event carries `aggregateVersion`; consumers ignore versions older than what they have applied. Relays may run in parallel (§10.1) |
+| 10 | Stale read from a lagging replica drives a write | Writes never trust read-side data: holds use the ledger built from the **primary**, PATCH uses `If-Match`, DB constraints decide |
+| 11 | Read-your-writes after booking | Command response carries the full resource; `/me/…` reads go to primary (§9.4) |
+| 12 | Ledger drift between Redis and DB | Write-through + `23P01`-triggered rebuild + 10-min marker TTL (§8.6) |
+| 13 | Clock skew between servers | Business-time checks use DB `now()`; hold expiry uses Redis `TIME`; overlap is pure range arithmetic (§12.3) |
+| 14 | Hot slot floods the database | Rejections happen in Redis; DB sees roughly one transaction per successful hold |
+| 15 | GiST index growth slows inserts over the years | Archival of reservations ended > 30 days (§7) |
+| 16 | Connection exhaustion as pods scale out | PgBouncer transaction pooling; bounded Hikari pools (§13) |
+
+## 9. CQRS read side (Approach A)
+
+### 9.1 Split
+
+![CQRS write and read paths](../../diagrams/08-cqrs-paths.png)
+
+<sub>Source: [`docs/diagrams/08-cqrs-paths.mmd`](../../diagrams/08-cqrs-paths.mmd)</sub>
+
+- **Command side** (`…command` package): booking, reschedule, transitions, blocks. Uses the
+  **primary** `DataSource`. Owns all writes and the outbox.
+- **Query side** (`…query` package): availability, Gantt schedule, appointment lists and
+  details. Uses the **replica** `DataSource` (Spring `AbstractRoutingDataSource` keyed on
+  `@Transactional(readOnly = true)`), plus Redis.
+- Same database schema; the split is logical and in the code, not two databases. An
+  ArchUnit test forbids query code from calling command repositories and vice versa.
+
+### 9.2 Redis caching (cache-aside, never authoritative)
+
+| Key | Content | Source | TTL | Invalidation |
+|---|---|---|---|---|
+| `catalog:{dealershipId}` | services offered, durations, bays, technicians + skills, opening hours, zone | replica | 10 min | TTL (reference data changes rarely) |
+| Slot ledger `ledger:{d:…}:*` (§8.6) | confirmed reservations + live holds per resource for a dealership-day | **primary** | marker 10 min | write-through after every commit; rebuilt on `23P01` |
+
+The ledger is loaded from the **primary**, not a replica: one indexed query per
+dealership-day, after which Redis absorbs the read storm. Loading it from a lagging replica
+would bake stale data into it.
+
+Redis down ⇒ cache calls fail fast (100 ms timeout, circuit breaker) and the service reads
+the database directly: slower, still correct.
+
+### 9.3 Availability computation
+
+`GET /dealerships/{id}/availability?serviceTypeIds=…&from=2026-11-02&to=2026-11-08`
+
+For each local date (max 14 days): take opening hours in the dealership zone, generate
+candidate starts every 15 minutes, and keep a start if **some** (technician with all skills,
+bay) pair has no overlap with the slot ledger (confirmed **and** live holds — a held slot
+shows as taken, like an airline seat) for `period` / `bayPeriod`. Pure in-memory
+computation over cached data (a dealership has tens of resources and at most a few hundred
+reservations a day). The same function produces the `alternatives` returned with
+`409 SLOT_UNAVAILABLE` (nearest 5 starts after the requested one).
+
+Availability is a **hint**: it may be a few hundred ms stale. The command side is the
+authority.
+
+### 9.4 Read replicas and read-your-writes
+
+| Read | Served from | Why |
+|---|---|---|
+| Command responses (`201`, `200` after PATCH) | the command transaction itself | Response body carries the full appointment, so the client never needs an immediate GET |
+| `GET /me/appointments`, `GET /me/appointments/{id}` | **primary** | A customer who just booked must see it; volume is low |
+| Gantt schedule, dispatcher lists | replica | High volume; replica lag (target < 1 s) is acceptable; every card carries `version`, and stale versions are rejected by `If-Match` anyway |
+| Availability | Redis slot ledger (from primary) + catalog (from replica) | §9.2 |
+
+## 10. Events — transactional outbox
+
+### 10.1 Flow
+
+![Outbox event flow to Kafka or SNS/SQS](../../diagrams/09-event-flow.png)
+
+<sub>Source: [`docs/diagrams/09-event-flow.mmd`](../../diagrams/09-event-flow.mmd)</sub>
+
+1. The command transaction inserts an `outbox_event` row alongside the state change ⇒ the
+   event exists **if and only if** the change committed.
+2. The **outbox relay** polls `SELECT … WHERE published_at IS NULL ORDER BY occurred_at
+   LIMIT 100 FOR UPDATE SKIP LOCKED` (safe with many relay instances), publishes, sets
+   `published_at`. Delivery is **at-least-once**; consumers deduplicate by event `id`.
+   Parallel relays can publish two events of one appointment out of order, so each event
+   carries `aggregateVersion` (the appointment's `version` after the change) and consumers
+   discard anything older than what they've already applied.
+3. At higher volume, replace polling with Debezium CDC on the outbox table (design note).
+
+The `EventPublisher` port has adapters:
+
+| Adapter | Status | Mapping |
+|---|---|---|
+| `LoggingEventPublisher` | Built (local default) | Writes the event as a structured log line ⇒ visible in OpenSearch |
+| `KafkaEventPublisher` | Design | Topic `scheduler.appointments.v1`, key = `dealershipId` ⇒ per-dealership ordering |
+| `SnsSqsEventPublisher` | Design | SNS FIFO topic, `MessageGroupId = dealershipId`, `MessageDeduplicationId = event id`; each consumer has its own SQS FIFO queue + DLQ |
+
+### 10.2 Event envelope (CloudEvents-style)
+
+```json
+{
+  "id": "0192f0c2-7c1e-7a51-9f1a-2b3c4d5e6f70",
+  "type": "AppointmentBooked",
+  "schemaVersion": 1,
+  "aggregateVersion": 0,
+  "source": "scheduler/eu-west",
+  "time": "2026-10-27T14:03:11.512Z",
+  "dealershipId": "…",
+  "data": {
+    "appointmentId": "…", "customerId": "…", "vehicleId": "…",
+    "serviceTypeCodes": ["OIL_CHANGE", "BRAKE_INSPECTION"],
+    "serviceBayId": "…", "technicianId": "…",
+    "start": "2026-11-02T09:00:00+00:00", "end": "2026-11-02T11:00:00+00:00",
+    "timeZone": "Europe/London", "status": "BOOKED"
+  }
+}
+```
+
+Event types: `AppointmentBooked`, `AppointmentRescheduled` (old + new period/resources),
+`AppointmentCancelled`, `AppointmentStatusChanged` (from, to), `ResourceBlockCreated`,
+`ResourceBlockRemoved`. Payloads carry IDs, not PII (no email/phone); the Email service
+looks contact details up via the Customer API under its own service identity.
+
+### 10.3 Consumers (design)
+
+- **Email/Notification** — confirmation, reschedule, cancellation, 24h reminder (scheduled
+  from `AppointmentBooked`), in the dealership's time zone and customer's locale.
+- **Reporting** — bay/technician utilisation, no-show rate, lead time, booking channel.
+  Builds its own read model (e.g. warehouse); never queries the scheduler DB.
+- **Live Gantt push** — a realtime service consumes events and pushes to dispatchers via
+  SSE/WebSocket (design; the demo Gantt polls `GET /schedule` every 30 s).
+
+## 11. Security
+
+### 11.1 Gateway contract
+
+The gateway (design-only) validates the JWT (signature via JWKS, `exp`, `aud`, `iss`) and
+then, **after deleting any incoming `X-User-*` header**, injects:
+
+| Header | Example | Meaning |
+|---|---|---|
+| `X-User-Id` | `6f1c…` (UUID) | Subject; for customers equals `customer.id` |
+| `X-User-Roles` | `CUSTOMER` or `DISPATCHER` | Comma-separated roles |
+| `X-Dealership-Ids` | `a1…,b2…` | Staff only: dealerships the user may act on |
+| `X-Request-Id`, `traceparent` | | Correlation |
+
+The gateway also checks the JWT `region` claim matches its own region (else `421`), so a
+request only ever reaches the region that holds the caller's data (§12.1).
+
+### 11.2 Trusting the headers safely
+
+Trusting headers means anyone who reaches the service directly can impersonate anyone.
+Controls (design): scheduler pods accept traffic only from the gateway (Kubernetes
+NetworkPolicy / security groups, no public ingress), with mTLS between gateway and service
+(service mesh). In code: a filter rejects requests missing `X-User-Id`/`X-User-Roles` with
+`401`, parses them into a `CallerContext`, and malformed values ⇒ `401`. Locally, cURL
+examples pass the headers by hand to stand in for the gateway.
+
+### 11.3 IDOR prevention
+
+IDs are UUIDv7 (non-sequential), but unguessable IDs are **not** authorization. Every query
+is scoped by the caller:
+
+- Customer endpoints live under `/me/…` and every repository method takes `customerId`
+  from `CallerContext` (`WHERE id = :id AND customer_id = :caller`). A resource that exists
+  but belongs to someone else returns **`404`**, indistinguishable from "does not exist".
+- Booking validates that `vehicleId` belongs to the caller; a `holdId` is only usable by
+  the user who created it (else `404`).
+- Dispatchers reach customer data only through `/dealerships/{d}/customers…` (guarded by
+  the dealership check); customer search requires at least 3 characters and caps results.
+- Dispatcher-only endpoints (§14.2) live under `/dealerships/{dealershipId}/…`; a guard
+  checks `dealershipId ∈ X-Dealership-Ids` (else `403`), and every query also filters by
+  `dealership_id = :dealershipId`, so an appointment ID from another dealership is `404`.
+- Shared catalog reads (`GET /dealerships`, `…/services`, `…/availability`) need an
+  authenticated caller of **any** role (`CUSTOMER` or `DISPATCHER`) and skip the dealership
+  guard. There are **no anonymous endpoints**: every request without identity headers is
+  `401` (design-team call; anonymous browsing would be a gateway-level change later).
+- Availability returns start times only — no technician names, bay names or other
+  customers' data.
+- Integration tests assert each of these (§17).
+
+Defence in depth (design): PostgreSQL row-level security keyed on a session variable for
+the dealership; gateway rate limits (e.g. 20 req/s per user on availability, 5 req/min per
+user on booking) to blunt enumeration and slot-scraping.
+
+### 11.4 Other
+
+Bean Validation on all inputs; parameterised SQL only; no stack traces in error bodies;
+secrets via environment/secret manager; dependency, code and container scanning (§16).
+
+## 12. Multi-region and time
+
+### 12.1 Regions (design)
+
+- **One independent stack per region** (e.g. eu-west, us-east, ap-southeast): gateway,
+  scheduler pods, PostgreSQL cluster (one primary + replicas), Redis cluster. Each region
+  holds only its own dealerships, customers and appointments.
+- **Routing by JWT**: the identity provider issues a `region` claim; the global load
+  balancer routes on it; the gateway rejects a token for another region with `421`.
+- **Single writer per dealership** follows automatically: a dealership's bays and
+  technicians exist in exactly one database, so its `EXCLUDE` constraint is local and there
+  is never a cross-region write conflict or any need for multi-master replication.
+- **Data residency**: customer data stays in the customer's region, which suits GDPR-style
+  rules by construction.
+- **Disaster recovery**: async cross-region replica of each regional primary. RPO ≈ seconds,
+  RTO ≈ 15 min by promoting the replica and pointing the region's DNS at it. During
+  failover the region is read-only rather than writable in two places.
+
+### 12.2 Time representation
+
+| Concern | Decision |
+|---|---|
+| Storage | `tstzrange` (UTC instants) for periods + dealership `zone_id` + `local_start` wall time |
+| API input | ISO-8601 **with offset**, e.g. `2026-11-02T09:00:00+00:00` — unambiguous. Server checks it falls inside opening hours in the dealership zone. |
+| API output | `start`/`end` with the dealership's offset, plus `timeZone` (IANA). |
+| UI | B2C and Gantt both show **dealership local time** (that is what the customer drives to). A dispatcher in a remote call centre sees the dealership's zone labelled on the board. |
+| DST gap (e.g. 01:30 on spring-forward day) | Availability is generated from local wall-clock opening hours with `ZonedDateTime`; non-existent local times are never offered. |
+| DST overlap (01:30 happens twice) | The offset in the request disambiguates. |
+| tzdata rule change after booking | We promised the customer the wall-clock time. A design-only reconciliation job compares `local_start` with `period` converted under new rules and flags mismatches to dispatchers/notifications. |
+
+### 12.3 Clock drift
+
+All "now" comparisons that affect correctness (booking window, cancellation cutoff, no-show
+grace) use PostgreSQL `now()` inside the command transaction, so one clock (the primary's)
+decides. App servers run NTP (chrony) only for log timestamps. Overlap correctness never
+depends on clocks at all — it is pure range arithmetic in the exclusion constraint. Client
+clocks are never trusted.
+
+### 12.4 Out of scope: cross-region use (deferred)
+
+Deliberately left out to keep the design clear; the rare cases are:
+
+- A customer booking at a dealership in another region (travel, moving country).
+- A customer or fleet with vehicles serviced in two regions.
+
+In this version such a customer simply doesn't see dealerships outside their region
+(`GET /dealerships` lists the region's own dealerships). A future version could add a
+small per-region **dealership directory** (`dealershipId → region`) at the gateway and
+forward mismatched requests to the dealership's region, plus a fan-out for
+`GET /me/appointments` — without changing the scheduler service.
+
+
+## 13. Scaling and deployment
+
+![Scaling and deployment](../../diagrams/05-scaling.png)
+
+<sub>Source: [`docs/diagrams/05-scaling.mmd`](../../diagrams/05-scaling.mmd)</sub>
+
+| Layer | Scaling rule |
+|---|---|
+| Gateway | Managed / autoscaled on RPS |
+| Scheduler pods | Stateless. HPA on CPU 60 % **and** RPS per pod (custom metric via Prometheus adapter). Min 3 across AZs; `PodDisruptionBudget` min 2. |
+| Connections | PgBouncer (transaction pooling) in front of primary and replicas, so pod count can grow without exhausting PostgreSQL connections. |
+| Primary | Vertical scale; ~330 writes/s/region is far below a single instance's limit. If a region outgrows it: shard by `dealership_id` (all data for a dealership already lives together, so sharding is natural). |
+| Replicas | 2 minimum, autoscale to 6 on CPU or replica lag; app routes reads round-robin. |
+| Redis | Cluster mode, 3 shards; keys are naturally distributed by dealership id. |
+| Outbox relay | Separate small deployment (2 replicas), `SKIP LOCKED` makes them cooperate. |
+
+Hot spots: one huge dealership on a Monday morning is still only a few writes per second
+on a few dozen resources; the exclusion index handles that trivially.
+
+## 14. API (REST, `/api/v1`, JSON)
+
+Full OpenAPI 3.1 spec is generated from code (springdoc) and committed as
+`docs/api/openapi.yaml`; it doubles as the mocked client contract.
+
+### 14.1 Customer endpoints (role `CUSTOMER`; the first three are shared reads open to any authenticated role, §11.3)
+
+| Method & path | Purpose |
+|---|---|
+| `GET /dealerships` | List dealerships (id, name, address, zone). Search by location is design-only. |
+| `GET /dealerships/{id}/services` | Service types offered, with durations |
+| `GET /dealerships/{id}/availability?serviceTypeIds=…&from=…&to=…` | Available start times per local date (§9.3) |
+| `GET /me/vehicles` · `POST /me/vehicles` | Customer's vehicles |
+| `POST /holds` | Hold a slot for 10 min (§8.6); body = dealership, vehicle, services, start |
+| `DELETE /holds/{holdId}` | Release my hold early (user went back) |
+| `POST /appointments` *(Idempotency-Key)* | Confirm a hold (`holdId`) or book directly (§8.3) |
+| `GET /me/appointments?status=&from=&to=` | My appointments (cursor paginated) |
+| `GET /me/appointments/{id}` | One of my appointments |
+| `PATCH /me/appointments/{id}` *(If-Match)* | Reschedule: body `{ "holdId": … }` for a hold taken on the new time (re-allocates) |
+| `POST /me/appointments/{id}/cancel` | Cancel |
+
+### 14.2 Dispatcher endpoints (role `DISPATCHER`, dealership in `X-Dealership-Ids`)
+
+| Method & path | Purpose |
+|---|---|
+| `GET /dealerships/{d}/schedule?date=YYYY-MM-DD&groupBy=BAY\|TECHNICIAN` | Gantt payload: lanes, appointments, blocks, opening hours |
+| `GET /dealerships/{d}/appointments?date=&status=` | List view |
+| `GET /dealerships/{d}/customers?q=` | Find customers by email, phone or vehicle registration (min 3 chars; returns at most 20) |
+| `POST /dealerships/{d}/customers` | Create a customer without a login (walk-in / phone) |
+| `POST /dealerships/{d}/customers/{customerId}/vehicles` | Add a vehicle for that customer |
+| `POST /dealerships/{d}/appointments` *(Idempotency-Key)* | Book on behalf of a customer: `{ customerId, vehicleId, serviceTypeIds, start, serviceBayId?, technicianId?, overrideHold? }` — direct path (§8.3) with the dispatcher policy (§6.4) |
+| `PATCH /dealerships/{d}/appointments/{id}` *(If-Match)* | Move / reassign / resize (drag-and-drop) |
+| `POST /dealerships/{d}/appointments/{id}/transitions` | `{ "action": "CHECK_IN" \| "START" \| "HOLD" \| "RESUME" \| "COMPLETE" \| "NO_SHOW" \| "CANCEL" }` |
+| `POST /dealerships/{d}/resource-blocks` · `DELETE /dealerships/{d}/resource-blocks/{id}` | Block / unblock a bay or technician |
+
+### 14.3 Key payloads
+
+**Book** — `POST /api/v1/appointments`
+
+```http
+X-User-Id: 6f1c0d7e-…      X-User-Roles: CUSTOMER
+Idempotency-Key: 9b2f…     Content-Type: application/json
+
+{
+  "dealershipId": "a1…",
+  "vehicleId": "v9…",
+  "serviceTypeIds": ["oil…", "brake…"],
+  "start": "2026-11-02T09:00:00+00:00",
+  "customerNotes": "Squeaking front left"
+}
+```
+
+`201 Created`, `Location: /api/v1/me/appointments/{id}`, `ETag: "0"`:
+
+```json
+{
+  "id": "0192f0c2-…",
+  "status": "BOOKED",
+  "version": 0,
+  "dealership": { "id": "a1…", "name": "Riverside Motors", "timeZone": "Europe/London" },
+  "vehicle": { "id": "v9…", "registration": "AB12 CDE", "make": "Ford", "model": "Focus" },
+  "services": [
+    { "code": "OIL_CHANGE", "name": "Oil Change", "durationMinutes": 45 },
+    { "code": "BRAKE_INSPECTION", "name": "Brake Inspection", "durationMinutes": 75 }
+  ],
+  "start": "2026-11-02T09:00:00+00:00",
+  "end": "2026-11-02T11:00:00+00:00",
+  "serviceBay": { "id": "…", "name": "Bay 3" },
+  "technician": { "id": "…", "displayName": "Sam K." }
+}
+```
+
+Whether customers see bay/technician names is a product choice; the default is yes for the
+confirmation, no in public availability.
+
+**Availability** — `200`:
+
+```json
+{
+  "dealershipId": "a1…", "timeZone": "Europe/London", "durationMinutes": 120,
+  "days": [
+    { "date": "2026-11-02", "starts": ["2026-11-02T08:00:00+00:00", "2026-11-02T08:15:00+00:00"] }
+  ]
+}
+```
+
+**Gantt schedule** — `200`:
+
+```json
+{
+  "date": "2026-11-02", "timeZone": "Europe/London",
+  "openingHours": { "opens": "08:00", "closes": "18:00" },
+  "lanes": [ { "id": "bay-3", "type": "BAY", "name": "Bay 3" } ],
+  "technicians": [ { "id": "…", "displayName": "Sam K.", "skills": ["OIL", "BRAKES"] } ],
+  "items": [
+    { "kind": "APPOINTMENT", "appointmentId": "…", "version": 2, "status": "IN_PROGRESS",
+      "laneId": "bay-3", "technicianId": "…", "start": "…", "end": "…",
+      "vehicle": "AB12 CDE · Ford Focus", "services": ["OIL_CHANGE"], "overrun": false },
+    { "kind": "BLOCK", "id": "…", "laneId": "bay-3", "start": "…", "end": "…", "reason": "Lift maintenance" }
+  ]
+}
+```
+
+**Drag-and-drop** — `PATCH /api/v1/dealerships/{d}/appointments/{id}`, `If-Match: "2"`:
+
+```json
+{ "start": "2026-11-02T13:00:00+00:00", "serviceBayId": "…", "technicianId": "…", "durationMinutes": 120 }
+```
+
+All fields optional; omitted ones keep current values.
+
+### 14.4 Errors (RFC 9457 `application/problem+json`)
+
+| HTTP | `code` | When |
+|---|---|---|
+| 400 | `VALIDATION_ERROR` | Bad body/params (`errors[]` lists fields) |
+| 401 | `UNAUTHENTICATED` | Missing/malformed identity headers |
+| 403 | `FORBIDDEN` | Wrong role, or dealership not in `X-Dealership-Ids` |
+| 404 | `NOT_FOUND` | Missing **or not yours** |
+| 409 | `SLOT_UNAVAILABLE` | No bay+technician pair free; body has `alternatives[]` (and `conflicts[]` for dispatchers) |
+| 409 | `SLOT_HELD` | Dispatcher target overlaps a customer's live hold (retry with `overrideHold`) |
+| 409 | `REQUEST_IN_PROGRESS` | Same idempotency key is being processed |
+| 409 | `INVALID_TRANSITION` | Status change not allowed |
+| 503 | `HOLDS_UNAVAILABLE` | Redis down; client should book directly |
+| 412 | `VERSION_CONFLICT` | `If-Match` doesn't match current version |
+| 422 | `OUTSIDE_OPENING_HOURS`, `OUTSIDE_BOOKING_WINDOW`, `CHANGE_WINDOW_CLOSED`, `TECHNICIAN_NOT_QUALIFIED`, `IDEMPOTENCY_KEY_REUSED` | Business rule violations |
+| 428 | `PRECONDITION_REQUIRED` | `If-Match` / `Idempotency-Key` missing |
+
+```json
+{
+  "type": "https://scheduler.example/problems/slot-unavailable",
+  "title": "Requested time is no longer available",
+  "status": 409, "code": "SLOT_UNAVAILABLE", "traceId": "4bf92f…",
+  "alternatives": ["2026-11-02T09:15:00+00:00", "2026-11-02T10:00:00+00:00"]
+}
+```
+
+## 15. UI design (wireframes — not built)
+
+### 15.1 B2C booking flow (mirrors Keyloop / Xtime: vehicle → services → time → confirm)
+
+```
+┌─ 1. Vehicle ───────────────┐ ┌─ 2. Dealership & services ─┐ ┌─ 3. Date & time ────────────┐
+│ ○ AB12 CDE  Ford Focus     │ │ Riverside Motors   [change]   │ │  Mon 2 Nov  Tue 3  Wed 4 ▸  │
+│ ○ XY65 ZZZ  VW Golf        │ │ ☑ Oil Change        45 min │ │  08:00  08:15  09:00  09:15 │
+│                            │ │                            │ │  tap a time ⇒ POST /holds   │
+│ + Add vehicle (VIN/reg)    │ │ ☑ Brake Inspection  75 min │ │  10:00  13:30  14:00        │
+│ Mileage [ 42,300 ]         │ │ ☐ MOT               60 min │ │  Times shown in UK time     │
+│                 [Next ▸]   │ │ Total 2h 00m     [Next ▸]  │ │                  [Next ▸]   │
+└────────────────────────────┘ └────────────────────────────┘ └─────────────────────────────┘
+┌─ 4. Review & confirm ──────────────────────┐   On 409: "Sorry, 09:00 was just taken.
+│ ⏱ Held for you · 9:41 left                 │    Nearest times: 09:15 · 10:00 · 13:30"
+│ Mon 2 Nov, 09:00–11:00 (UK time)           │
+│ Ford Focus · Oil Change + Brake Inspection │    (one tap rebooks, same Idempotency
+│ Notes [ Squeaking front left            ]  │     flow with a new key)
+│                       [Confirm booking]    │
+└────────────────────────────────────────────┘
+```
+
+"My appointments" lists upcoming/past bookings with Reschedule / Cancel (disabled within
+24h, with the reason shown). Transport options appear as step 3b in the design-only
+extension.
+
+### 15.2 Dispatcher Gantt board
+
+```
+ Riverside Motors · Mon 2 Nov 2026 · Europe/London   [◂ Day ▸]  Group by: (•) Bay ( ) Technician   ⟳ 30s
+          08:00     09:00     10:00     11:00     12:00     13:00     14:00     15:00 ... 18:00
+ Bay 1   │████ AB12CDE Oil+Brake ████│                 │▓▓ XY65 MOT ▓▓│
+         │ Sam K. · IN_PROGRESS      │                 │ Lee P.·BOOKED│
+ Bay 2   │░░░░░░ Lift maintenance (block) ░░░░░░│  │████ KL20 Brakes ████▌overrun
+ Bay 3   │          │▓▓▓ JK70 Service ▓▓▓│
+         └ unassigned / waiting list ───────────────────────────────────────────────────────
+ Legend: ▓ BOOKED  █ IN_PROGRESS  ▒ ON_HOLD  ░ BLOCK  ▌ overrun   now ▏
+```
+
+Interactions → API:
+
+| Gesture | Call | On failure |
+|---|---|---|
+| Drag card horizontally | `PATCH` with new `start`, `If-Match` | `409`/`412` ⇒ card snaps back, toast names the conflict, board refreshes |
+| Drag to another lane | `PATCH` with `serviceBayId` (bay view) or `technicianId` (tech view) | `422 TECHNICIAN_NOT_QUALIFIED` ⇒ snap back; lanes of unqualified techs are greyed while dragging (skills come in the schedule payload) |
+| Drag card edge | `PATCH` with `durationMinutes` | as above |
+| Card menu | `POST …/transitions` | `409 INVALID_TRANSITION` ⇒ menu only shows legal actions anyway |
+| Select empty range on a lane | `POST …/resource-blocks` | `409` lists overlapping jobs |
+
+The UI never decides correctness: it predicts conflicts for good UX, and the server's
+answer always wins.
+
+## 16. Technology choices
+
+| Technology | Why |
+|---|---|
+| Java 21 + Spring Boot 3.x | Mature, well known to reviewers; virtual threads for cheap blocking I/O; first-class Testcontainers, Actuator, Micrometer |
+| PostgreSQL 16 | `tstzrange` + `EXCLUDE USING gist` is the core correctness mechanism; streaming replicas; mature RLS |
+| Spring JDBC / `JdbcClient` (+ Spring Data for simple reads) | Range types and exclusion errors are clearer in explicit SQL than through JPA mappings (builder may choose JPA where it fits) |
+| Flyway | Versioned schema + seed data |
+| Redis 7 (Lettuce) | Fast cache-aside; cluster mode for scale |
+| springdoc-openapi | Generates the API contract used as the client stub |
+| logstash-logback-encoder | JSON logs with MDC fields |
+| Fluent Bit + OpenSearch 2.x + Dashboards | Required log stack; open-source, runs in Docker |
+| Micrometer + Prometheus; OpenTelemetry Java agent | Metrics and traces with vendor-neutral formats |
+| JUnit 5, AssertJ, Testcontainers, RestAssured/MockMvc, ArchUnit | Unit, real-Postgres concurrency, API and architecture tests |
+| Maven | Build; runs Spotless, Checkstyle, JaCoCo, OWASP checks in `verify` |
+| Docker Compose | One-command local stack |
+| Kafka or SNS/SQS, Kubernetes + HPA, API Gateway, OIDC IdP | Design-only production components |
+
+## 17. Quality, security tooling and tests
+
+**Build gates (`mvn verify`)**
+- Spotless (google-java-format) — formatting.
+- Checkstyle (Google checks, build fails on violation).
+- JaCoCo — coverage threshold ≥ 80 % on domain + command packages.
+- OWASP Dependency-Check — fails on CVSS ≥ 7 (account-free fallback).
+- ArchUnit — command/query separation, no controller → repository shortcuts.
+
+**Snyk (local, needs a free account + `snyk auth`)**: `snyk test` (dependencies),
+`snyk code test` (SAST), `snyk container test scheduler:local` (image). Wrapped in a
+`make security` (or script) target and documented in the README.
+
+**Test suite**
+| Layer | Examples |
+|---|---|
+| Unit | Duration and period maths; opening-hours check incl. DST gap/overlap; state machine (every legal and illegal transition); allocation ranking; availability generation |
+| Integration (Testcontainers Postgres + Redis) | `EXCLUDE` rejects overlap for bay and technician; back-to-back allowed; 45 min vs 75 min overlapping requests; bay buffer; cancelled/no-show frees time; block vs appointment conflicts; outbox row written iff commit |
+| **Concurrency** | 50 threads book the same start at a dealership with 1 bay ⇒ exactly 1 `201`, 49 `409` — run **both** via holds and via the direct path; N threads with mixed 45/75-min overlapping periods ⇒ no overlapping active reservations afterwards (verified by SQL); two dispatchers PATCH the same version ⇒ one `200`, one `412`; check-in vs. cancel race ⇒ exactly one wins; duplicate idempotency key in parallel ⇒ one appointment |
+| **Redis failure modes** | Flush the ledger mid-test, then book ⇒ still no double booking and ledger rebuilds; stop Redis ⇒ `/holds` `503`, direct booking works; expired hold confirm ⇒ `201` if free, `409` if taken; dispatcher onto a held slot ⇒ `409 SLOT_HELD`, with override ⇒ `200` |
+| API / security | Every endpoint without identity headers ⇒ `401`; customer B reading/cancelling customer A's appointment ⇒ `404`; booking with someone else's vehicle ⇒ `404`; dispatcher on a dealership not in header ⇒ `403`; idempotent retry returns same appointment |
+| Cache | Redis stopped ⇒ availability and booking still correct |
+| Load (design + script) | k6 script for availability and booking mix; reported, not gated |
+
+## 18. Observability
+
+**Logs** — JSON to stdout with `timestamp`, `level`, `logger`, `message`, `traceId`,
+`spanId`, `requestId`, `userId` (UUID only, no PII), `dealershipId`, `appointmentId`,
+`event`. Docker's fluentd log driver → Fluent Bit → OpenSearch index `scheduler-logs-*`;
+an OpenSearch Dashboards saved search/dashboard is provisioned for: bookings, conflicts,
+errors by code. Business events (`AppointmentBooked`…) are also logged by the
+`LoggingEventPublisher`, so the full lifecycle is searchable.
+
+**Metrics** (Micrometer, `/actuator/prometheus`)
+- `scheduler_booking_attempts_total{outcome=created|conflict|rejected}`
+- `scheduler_allocation_retries_total`, `scheduler_exclusion_violations_total`
+- `scheduler_availability_latency_seconds` (histogram), cache hit ratio by cache
+- `scheduler_outbox_backlog`, `scheduler_outbox_publish_lag_seconds`
+- DB pool usage, replica lag (exporter)
+
+**Tracing** — OpenTelemetry Java agent; `traceparent` propagated from the gateway; spans
+for HTTP, JDBC, Redis, outbox publish. Trace id is echoed in every problem response.
+
+**SLOs and alerts (design)**
+| SLO | Target |
+|---|---|
+| Booking API availability | 99.9 % monthly |
+| `POST /appointments` latency | p99 < 300 ms |
+| Availability latency | p99 < 150 ms |
+| Event delivery | 99 % published < 5 s after commit |
+
+Alerts: error budget burn, conflict-rate spike (UX or scraping signal), outbox backlog > 1k
+or lag > 30 s, replica lag > 2 s, Redis circuit open.
+
+## 19. Local development (Docker Compose)
+
+```
+docker compose up --build
+```
+
+![Local Docker Compose stack](../../diagrams/10-local-docker.png)
+
+<sub>Source: [`docs/diagrams/10-local-docker.mmd`](../../diagrams/10-local-docker.mmd)</sub>
+
+| Service | Image (pinned in compose) | Port |
+|---|---|---|
+| `scheduler` | built from `Dockerfile` (multi-stage, JRE 21, non-root) | 8080 |
+| `postgres-primary` | bitnami/postgresql 16 (replication master) | 5432 |
+| `postgres-replica` | bitnami/postgresql 16 (replica) | 5433 |
+| `redis` | redis 7 | 6379 |
+| `opensearch` | opensearchproject/opensearch 2.x, single node, security plugin disabled for local | 9200 |
+| `opensearch-dashboards` | opensearchproject/opensearch-dashboards 2.x | 5601 |
+| `fluent-bit` | fluent/fluent-bit | 24224 |
+
+Flyway seeds: 2 dealerships in different zones (e.g. `Europe/London`, `America/New_York`),
+3 bays and 4 technicians with mixed skills each, a service catalog, 2 customers with
+vehicles. `docs/api/examples.http` + a cURL script exercise the whole flow, passing identity
+headers by hand in place of the gateway. Health: `/actuator/health` (readiness includes DB
+and Redis — Redis down ⇒ degraded, not down).
+
+## 20. Approaches considered
+
+| | A. Logical CQRS + replicas + Redis cache-aside | B. Full CQRS with event-driven projections | C. Event sourcing |
+|---|---|---|---|
+| Shape | One schema; command/query split in code; reads from replicas + Redis | Outbox → broker → projectors build denormalised read stores | Event store is the system of record |
+| Pros | Simple, fully testable locally, comfortably meets ~10k reads/s & ~1k writes/s | Read side scales and evolves independently; fastest reads | Full audit history |
+| Cons | Gantt reads join normalised tables | Broker + projectors + replay; seconds of lag; much harder to test | `EXCLUDE` needs current-state tables; overlap checks become hard |
+| Verdict | **Chosen** | **Evolution path** | Rejected |
+
+**When to move from A to B**: replica lag regularly > 1 s, Gantt p99 > 200 ms, or a new
+consumer needs a read shape the OLTP schema can't serve. The outbox and event envelope
+already exist, so B is additive: add projectors that consume the same events.
+
+## 21. How GenAI was used in the design phase
+
+- **Tooling**: Claude Code with the Superpowers `brainstorming` skill. Its hard gate forbade
+  any code or scaffolding until this document is approved.
+- **Adversarial prompting**: I instructed the agent to act as a cynical Principal
+  Distributed Systems Engineer and interrogate concurrency, bottlenecks, multi-region time
+  and IDOR before proposing anything.
+- **Grounding**: the agent read the official challenge PDF (it flagged that only one layer
+  must be implemented, which shaped the backend-only scope) and researched real products
+  (Keyloop Service Booking, Xtime, dispatch boards) to derive the booking flow, lifecycle
+  states and capacity model, and Keyloop's published footprint for the capacity estimate.
+- **Challenge and resolve**: each of my directions was challenged and resolved — e.g. the
+  agent rejected Redis locks in favour of my `EXCLUDE` choice and added the partial
+  constraint; flagged header spoofing behind the gateway; flagged the replica
+  read-your-writes trap; argued full CQRS was premature given the numbers. The complete
+  record is in `docs/ai-collaboration/decision-log.md`.
+- **Verification**: a separate reviewer agent read this document cold as the future
+  builder and listed what it would still have to guess; those gaps were resolved before
+  approval.
+
+## 22. Left to the builder
+
+- Package layout inside the command/query split (hexagonal or layered), as long as ArchUnit
+  rules hold.
+- JDBC vs JPA per repository; DDL details, index tuning, migration file breakdown.
+- Exact seed data, cURL scripts, k6 script contents.
+- Retry/backoff constants, cache TTL fine-tuning, pagination cursor format.
+- Error message wording; OpenAPI annotations.
+- Docker image tags (pin exact versions), Fluent Bit parser config, OpenSearch dashboard
+  layout.
