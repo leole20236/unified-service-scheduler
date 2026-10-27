@@ -16,13 +16,18 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.FieldError;
+import org.springframework.web.ErrorResponse;
 import org.springframework.web.HttpMediaTypeNotAcceptableException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingPathVariableException;
+import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
+import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
@@ -35,7 +40,7 @@ public class ApiExceptionHandler {
   /** Handles all domain failures. */
   @ExceptionHandler(ApiException.class)
   public ResponseEntity<ProblemDetail> handleApi(ApiException ex, HttpServletRequest request) {
-    ProblemDetail problem = problem(ProblemCodes.valueOf(ex.code()), ex.getMessage(), request);
+    ProblemDetail problem = problem(ex.code(), ex.getMessage(), request);
     ex.extras().forEach(problem::setProperty);
     ResponseEntity.BodyBuilder builder = ResponseEntity.status(ex.status());
     if (ex.retryAfterSeconds() != null) {
@@ -90,6 +95,54 @@ public class ApiExceptionHandler {
       MissingServletRequestParameterException ex, HttpServletRequest request) {
     return validation(
         List.of(Map.of("field", ex.getParameterName(), "message", "is required")), request);
+  }
+
+  /** A missing header: 428 for the precondition headers, otherwise 400. */
+  @ExceptionHandler(MissingRequestHeaderException.class)
+  public ResponseEntity<ProblemDetail> handleMissingHeader(
+      MissingRequestHeaderException ex, HttpServletRequest request) {
+    String header = ex.getHeaderName();
+    if ("If-Match".equalsIgnoreCase(header) || "Idempotency-Key".equalsIgnoreCase(header)) {
+      return respond(
+          ResponseEntity.status(HttpStatus.PRECONDITION_REQUIRED),
+          problem(
+              ProblemCodes.PRECONDITION_REQUIRED,
+              header + " header is required for this request.",
+              request));
+    }
+    return validation(List.of(Map.of("field", header, "message", "header is required")), request);
+  }
+
+  /** Other binding failures (path variables, remaining request values). */
+  @ExceptionHandler(ServletRequestBindingException.class)
+  public ResponseEntity<ProblemDetail> handleBinding(
+      ServletRequestBindingException ex, HttpServletRequest request) {
+    String field =
+        ex instanceof MissingPathVariableException missing ? missing.getVariableName() : "request";
+    return validation(List.of(Map.of("field", field, "message", "is missing or invalid")), request);
+  }
+
+  /** Constraint violations on controller method parameters (Spring 6.1+). */
+  @ExceptionHandler(HandlerMethodValidationException.class)
+  public ResponseEntity<ProblemDetail> handleMethodValidation(
+      HandlerMethodValidationException ex, HttpServletRequest request) {
+    List<Map<String, String>> errors =
+        ex.getParameterValidationResults().stream()
+            .flatMap(
+                result -> {
+                  String name = result.getMethodParameter().getParameterName();
+                  String field = name != null ? name : "parameter";
+                  return result.getResolvableErrors().stream()
+                      .map(
+                          e ->
+                              Map.of(
+                                  "field",
+                                  field,
+                                  "message",
+                                  String.valueOf(e.getDefaultMessage())));
+                })
+            .toList();
+    return validation(errors, request);
   }
 
   /** The body is missing or not parseable. */
@@ -148,6 +201,9 @@ public class ApiExceptionHandler {
   /** Anything unexpected: logged with the trace id, never leaked. */
   @ExceptionHandler(Exception.class)
   public ResponseEntity<ProblemDetail> handleUnexpected(Exception ex, HttpServletRequest request) {
+    if (ex instanceof ErrorResponse errorResponse) {
+      return handleErrorResponse(errorResponse, request);
+    }
     ProblemDetail problem =
         problem(
             ProblemCodes.INTERNAL_ERROR,
@@ -155,6 +211,29 @@ public class ApiExceptionHandler {
             request);
     LOG.error("Unhandled exception, traceId={}", problem.getProperties().get("traceId"), ex);
     return respond(ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR), problem);
+  }
+
+  private static ResponseEntity<ProblemDetail> handleErrorResponse(
+      ErrorResponse ex, HttpServletRequest request) {
+    int status = ex.getStatusCode().value();
+    ProblemCodes code =
+        switch (status) {
+          case 401 -> ProblemCodes.UNAUTHENTICATED;
+          case 403 -> ProblemCodes.FORBIDDEN;
+          case 404 -> ProblemCodes.NOT_FOUND;
+          case 405 -> ProblemCodes.METHOD_NOT_ALLOWED;
+          case 406 -> ProblemCodes.NOT_ACCEPTABLE;
+          case 415 -> ProblemCodes.UNSUPPORTED_MEDIA_TYPE;
+          case 428 -> ProblemCodes.PRECONDITION_REQUIRED;
+          case 429 -> ProblemCodes.RATE_LIMITED;
+          case 503 -> ProblemCodes.SERVICE_UNAVAILABLE;
+          default -> status >= 500 ? ProblemCodes.INTERNAL_ERROR : ProblemCodes.VALIDATION_ERROR;
+        };
+    String detail = ex.getBody().getDetail();
+    if (status >= 500 || detail == null) {
+      detail = code.title() + ".";
+    }
+    return respond(ResponseEntity.status(code.status()), problem(code, detail, request));
   }
 
   private ResponseEntity<ProblemDetail> validation(

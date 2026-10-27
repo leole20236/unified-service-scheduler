@@ -20,8 +20,8 @@ public abstract class ApiException extends RuntimeException {
   }
 
   /** Stable machine-readable code. */
-  public String code() {
-    return problem.name();
+  public ProblemCodes code() {
+    return problem;
   }
 
   /** Extra problem properties (for example {@code alternatives}). */

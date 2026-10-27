@@ -1,6 +1,7 @@
 package com.keyloop.scheduler.common.web;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import jakarta.servlet.FilterChain;
 import java.util.ArrayList;
@@ -64,16 +65,18 @@ class MdcFilterTest {
   @Test
   void clearsMdcWhenChainThrows() {
     MockHttpServletRequest request = new MockHttpServletRequest("GET", "/x");
-    try {
-      filter.doFilter(
-          request,
-          new MockHttpServletResponse(),
-          (req, res) -> {
-            throw new IllegalStateException("boom");
-          });
-    } catch (Exception expected) {
-      assertThat(expected).isInstanceOf(IllegalStateException.class);
-    }
-    assertThat(MDC.get("requestId")).isNull();
+    MDC.put("userId", "u");
+
+    assertThatThrownBy(
+            () ->
+                filter.doFilter(
+                    request,
+                    new MockHttpServletResponse(),
+                    (req, res) -> {
+                      throw new IllegalStateException("boom");
+                    }))
+        .isInstanceOf(IllegalStateException.class);
+
+    assertThat(MDC.getCopyOfContextMap()).isNullOrEmpty();
   }
 }

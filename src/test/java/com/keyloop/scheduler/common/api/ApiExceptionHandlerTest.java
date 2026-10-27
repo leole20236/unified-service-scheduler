@@ -1,6 +1,7 @@
 package com.keyloop.scheduler.common.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.ConstraintViolationException;
@@ -13,9 +14,13 @@ import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import org.springframework.context.MessageSourceResolvable;
+import org.springframework.context.support.DefaultMessageSourceResolvable;
+import org.springframework.core.DefaultParameterNameDiscoverer;
 import org.springframework.core.MethodParameter;
 import org.springframework.http.HttpInputMessage;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
@@ -23,12 +28,20 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.validation.BeanPropertyBindingResult;
 import org.springframework.validation.FieldError;
+import org.springframework.validation.method.MethodValidationResult;
+import org.springframework.validation.method.ParameterValidationResult;
+import org.springframework.web.ErrorResponseException;
 import org.springframework.web.HttpMediaTypeNotAcceptableException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingPathVariableException;
+import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
+import org.springframework.web.bind.ServletRequestBindingException;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 class ApiExceptionHandlerTest {
@@ -84,12 +97,12 @@ class ApiExceptionHandlerTest {
                 "PRECONDITION_REQUIRED",
                 "Precondition header required"),
             new Case(
-                new BusinessRuleException("OUTSIDE_BOOKING_WINDOW", "d"),
+                new BusinessRuleException(ProblemCodes.OUTSIDE_BOOKING_WINDOW, "d"),
                 422,
                 "OUTSIDE_BOOKING_WINDOW",
                 "Time is outside the booking window"),
             new Case(
-                new BusinessRuleException("HOLD_MISMATCH", "d"),
+                new BusinessRuleException(ProblemCodes.HOLD_MISMATCH, "d"),
                 422,
                 "HOLD_MISMATCH",
                 "Hold does not match the request"));
@@ -263,5 +276,121 @@ class ApiExceptionHandlerTest {
     assertThat(ProblemCodes.values()).hasSize(28);
     assertThat(ProblemCodes.valueOf("RATE_LIMITED").title()).isEqualTo("Too many requests");
     assertThat(ProblemCodes.valueOf("SERVICE_UNAVAILABLE").status()).isEqualTo(503);
+  }
+
+  @Test
+  void businessRuleRejectsNon422Codes() {
+    assertThatThrownBy(() -> new BusinessRuleException(ProblemCodes.NOT_FOUND, "d"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void missingPreconditionHeadersAre428() {
+    for (String header : new String[] {"If-Match", "idempotency-key"}) {
+      ResponseEntity<ProblemDetail> response =
+          handler.handleMissingHeader(missingHeader(header), request);
+      assertProblem(response, 428, "PRECONDITION_REQUIRED", "Precondition header required");
+      assertThat(response.getBody().getDetail())
+          .isEqualTo(header + " header is required for this request.");
+    }
+  }
+
+  @Test
+  void otherMissingHeaderIsValidationError() {
+    ResponseEntity<ProblemDetail> response =
+        handler.handleMissingHeader(missingHeader("X-Other"), request);
+    assertProblem(response, 400, "VALIDATION_ERROR", "Request is invalid");
+    assertThat(response.getBody().getProperties().get("errors"))
+        .isEqualTo(List.of(Map.of("field", "X-Other", "message", "header is required")));
+  }
+
+  private MissingRequestHeaderException missingHeader(String name) {
+    try {
+      Method method = ApiExceptionHandlerTest.class.getDeclaredMethod("target", String.class);
+      return new MissingRequestHeaderException(name, new MethodParameter(method, 0));
+    } catch (NoSuchMethodException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  @Test
+  void bindingFailuresAreValidationErrors() throws Exception {
+    Method method = ApiExceptionHandlerTest.class.getDeclaredMethod("target", String.class);
+    ResponseEntity<ProblemDetail> pathVariable =
+        handler.handleBinding(
+            new MissingPathVariableException("id", new MethodParameter(method, 0)), request);
+    assertProblem(pathVariable, 400, "VALIDATION_ERROR", "Request is invalid");
+    assertThat(pathVariable.getBody().getProperties().get("errors"))
+        .isEqualTo(List.of(Map.of("field", "id", "message", "is missing or invalid")));
+
+    ResponseEntity<ProblemDetail> other =
+        handler.handleBinding(new ServletRequestBindingException("bad"), request);
+    assertThat(other.getBody().getProperties().get("errors"))
+        .isEqualTo(List.of(Map.of("field", "request", "message", "is missing or invalid")));
+  }
+
+  @Test
+  void methodValidationListsParameters() throws Exception {
+    Method method = ApiExceptionHandlerTest.class.getDeclaredMethod("target", String.class);
+    MethodParameter named = new MethodParameter(method, 0);
+    named.initParameterNameDiscovery(new DefaultParameterNameDiscoverer());
+    MethodParameter anonymous = new MethodParameter(method, 0);
+    MessageSourceResolvable error =
+        new DefaultMessageSourceResolvable(new String[] {"c"}, "too big");
+    ParameterValidationResult first = Mockito.mock(ParameterValidationResult.class);
+    Mockito.when(first.getMethodParameter()).thenReturn(named);
+    Mockito.doReturn(List.of(error)).when(first).getResolvableErrors();
+    ParameterValidationResult second = Mockito.mock(ParameterValidationResult.class);
+    Mockito.when(second.getMethodParameter()).thenReturn(anonymous);
+    Mockito.doReturn(List.of(error)).when(second).getResolvableErrors();
+    MethodValidationResult result = Mockito.mock(MethodValidationResult.class);
+    Mockito.when(result.getParameterValidationResults()).thenReturn(List.of(first, second));
+
+    ResponseEntity<ProblemDetail> response =
+        handler.handleMethodValidation(new HandlerMethodValidationException(result), request);
+
+    assertProblem(response, 400, "VALIDATION_ERROR", "Request is invalid");
+    assertThat(response.getBody().getDetail()).isEqualTo("2 fields are invalid.");
+    assertThat(response.getBody().getProperties().get("errors"))
+        .isEqualTo(
+            List.of(
+                Map.of("field", "value", "message", "too big"),
+                Map.of("field", "parameter", "message", "too big")));
+  }
+
+  @Test
+  void errorResponseExceptionsKeepTheirStatusFamily() {
+    Map<Integer, String> expected =
+        Map.ofEntries(
+            Map.entry(401, "UNAUTHENTICATED"),
+            Map.entry(403, "FORBIDDEN"),
+            Map.entry(404, "NOT_FOUND"),
+            Map.entry(405, "METHOD_NOT_ALLOWED"),
+            Map.entry(406, "NOT_ACCEPTABLE"),
+            Map.entry(415, "UNSUPPORTED_MEDIA_TYPE"),
+            Map.entry(428, "PRECONDITION_REQUIRED"),
+            Map.entry(429, "RATE_LIMITED"),
+            Map.entry(503, "SERVICE_UNAVAILABLE"),
+            Map.entry(418, "VALIDATION_ERROR"),
+            Map.entry(502, "INTERNAL_ERROR"));
+    expected.forEach(
+        (status, code) -> {
+          ResponseEntity<ProblemDetail> response =
+              handler.handleUnexpected(
+                  new ResponseStatusException(HttpStatusCode.valueOf(status), "reason"), request);
+          ProblemCodes problem = ProblemCodes.valueOf(code);
+          assertProblem(response, problem.status(), code, problem.title());
+        });
+    ResponseEntity<ProblemDetail> client =
+        handler.handleUnexpected(
+            new ResponseStatusException(HttpStatusCode.valueOf(404), "gone"), request);
+    assertThat(client.getBody().getDetail()).isEqualTo("gone");
+    ResponseEntity<ProblemDetail> server =
+        handler.handleUnexpected(
+            new ResponseStatusException(HttpStatusCode.valueOf(502), "secret"), request);
+    assertThat(server.getBody().getDetail()).doesNotContain("secret");
+    ResponseEntity<ProblemDetail> noReason =
+        handler.handleUnexpected(new ErrorResponseException(HttpStatusCode.valueOf(403)), request);
+    assertThat(noReason.getBody().getDetail()).isNotBlank();
   }
 }

@@ -161,7 +161,7 @@ class ApiExceptionHandlerIT extends IntegrationTest {
     for (ProblemCodes code : ProblemCodes.values()) {
       given()
           .headers(Headers.customer(user))
-          .get("/test/probe/rule/" + code.name())
+          .get("/test/probe/code/" + code.name())
           .then()
           .statusCode(code.status())
           .contentType(containsString("application/problem+json"))
@@ -185,5 +185,59 @@ class ApiExceptionHandlerIT extends IntegrationTest {
             .then(),
         403,
         "FORBIDDEN");
+  }
+
+  @Test
+  void missingPreconditionHeaderIs428() {
+    problem(
+            given().headers(Headers.customer(user)).get("/test/probe/header").then(),
+            428,
+            "PRECONDITION_REQUIRED")
+        .body("detail", equalTo("If-Match header is required for this request."));
+  }
+
+  @Test
+  void otherMissingHeaderIs400() {
+    problem(
+            given().headers(Headers.customer(user)).get("/test/probe/other-header").then(),
+            400,
+            "VALIDATION_ERROR")
+        .body("errors[0].field", equalTo("X-Other"));
+  }
+
+  @Test
+  void missingAndInvalidParametersAre400() {
+    problem(
+            given().headers(Headers.customer(user)).get("/test/probe/param").then(),
+            400,
+            "VALIDATION_ERROR")
+        .body("errors[0].field", equalTo("n"));
+    problem(
+            given().headers(Headers.customer(user)).get("/test/probe/param?n=9").then(),
+            400,
+            "VALIDATION_ERROR")
+        .body("errors[0].field", equalTo("n"));
+    problem(
+            given().headers(Headers.customer(user)).get("/test/probe/param?n=abc").then(),
+            400,
+            "VALIDATION_ERROR")
+        .body("errors[0].field", equalTo("n"));
+  }
+
+  @Test
+  void responseStatusExceptionMapsToItsCode() {
+    problem(
+            given().headers(Headers.customer(user)).get("/test/probe/status").then(),
+            404,
+            "NOT_FOUND")
+        .body("detail", equalTo("Nothing here."));
+  }
+
+  @Test
+  void businessRuleIs422() {
+    problem(
+        given().headers(Headers.customer(user)).get("/test/probe/rule").then(),
+        422,
+        "HOLD_MISMATCH");
   }
 }

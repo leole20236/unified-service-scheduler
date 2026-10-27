@@ -1,6 +1,7 @@
 package com.keyloop.scheduler.common.security;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -8,6 +9,8 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.FilterChain;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -93,13 +96,35 @@ class IdentityHeaderFilterTest {
     request.addHeader("X-User-Roles", "CUSTOMER");
     MockHttpServletResponse response = new MockHttpServletResponse();
 
-    filter.doFilter(request, response, chain);
+    List<String> userInMdc = new ArrayList<>();
+    FilterChain recording = (req, res) -> userInMdc.add(MDC.get("userId"));
 
-    verify(chain).doFilter(request, response);
+    filter.doFilter(request, response, recording);
+
+    assertThat(userInMdc).containsExactly(user.toString());
     CallerContext caller = (CallerContext) request.getAttribute(CallerContext.REQUEST_ATTRIBUTE);
     assertThat(caller.userId()).isEqualTo(user);
     assertThat(caller.roles()).containsExactly(Role.CUSTOMER);
     assertThat(caller.dealershipIds()).isEmpty();
+    assertThat(MDC.get("userId")).isNull();
+  }
+
+  @Test
+  void clearsUserIdWhenChainThrows() {
+    MockHttpServletRequest request = request("/api/v1/me/appointments");
+    request.addHeader("X-User-Id", user.toString());
+    request.addHeader("X-User-Roles", "CUSTOMER");
+
+    assertThatThrownBy(
+            () ->
+                filter.doFilter(
+                    request,
+                    new MockHttpServletResponse(),
+                    (req, res) -> {
+                      throw new IllegalStateException("boom");
+                    }))
+        .isInstanceOf(IllegalStateException.class);
+
     assertThat(MDC.get("userId")).isNull();
   }
 
