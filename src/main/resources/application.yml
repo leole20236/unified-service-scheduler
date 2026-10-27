@@ -4,8 +4,9 @@ spring:
   threads:
     virtual:
       enabled: true
-  flyway:
-    fail-on-missing-locations: false
+  datasource:
+    hikari:
+      connection-init-sql: SET TIME ZONE 'UTC'
 
 server:
   shutdown: graceful

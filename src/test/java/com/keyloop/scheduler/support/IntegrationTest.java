@@ -1,9 +1,13 @@
 package com.keyloop.scheduler.support;
 
+import static com.keyloop.scheduler.support.Fixtures.SEED_CUSTOMERS;
+import static com.keyloop.scheduler.support.Fixtures.SEED_VEHICLES;
 import static org.springframework.boot.test.context.SpringBootTest.WebEnvironment.RANDOM_PORT;
 
 import com.keyloop.scheduler.SchedulerApplication;
+import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -53,6 +57,11 @@ public abstract class IntegrationTest {
     registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
   }
 
+  private void deleteExcept(String table, List<UUID> keep) {
+    String placeholders = String.join(", ", Collections.nCopies(keep.size(), "?"));
+    jdbc.update("DELETE FROM " + table + " WHERE id NOT IN (" + placeholders + ")", keep.toArray());
+  }
+
   @BeforeEach
   void resetState() {
     List<String> tables =
@@ -61,13 +70,16 @@ public abstract class IntegrationTest {
             SELECT table_name FROM information_schema.tables
             WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
               AND table_name <> 'flyway_schema_history'
-              AND table_name IN ('appointment', 'appointment_service', 'resource_reservation',
-                                 'outbox_event', 'idempotency_key', 'vehicle', 'customer')
+              AND table_name NOT IN ('dealership', 'opening_hours', 'skill', 'service_type',
+                                     'dealership_service', 'service_bay', 'technician',
+                                     'technician_skill', 'customer', 'vehicle')
             """,
             String.class);
     if (!tables.isEmpty()) {
       jdbc.execute("TRUNCATE TABLE " + String.join(", ", tables) + " CASCADE");
     }
+    deleteExcept("vehicle", SEED_VEHICLES);
+    deleteExcept("customer", SEED_CUSTOMERS);
     try (var connection = redisConnectionFactory.getConnection()) {
       connection.serverCommands().flushAll();
     }
