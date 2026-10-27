@@ -172,7 +172,7 @@ says what to do next.
 
 | Risk | Handling |
 |---|---|
-| Two people book the same time | `EXCLUDE` constraint; Redis hold rejects most collisions earlier |
+| Two people book the same time | `EXCLUDE` constraint; Redis hold rejects most collisions earlier. **Proven by concurrency tests**: 50–100 simultaneous requests, mixed durations, every write path at once, and two app instances sharing one database ⇒ never more than one booking per bay/technician slot |
 | Redis loses data or is down | Database still decides; ledger rebuilds itself; booking falls back to the direct path |
 | Two dispatchers move the same job | `If-Match` ⇒ `412` |
 | Client retries a booking | `Idempotency-Key` ⇒ same appointment returned |
