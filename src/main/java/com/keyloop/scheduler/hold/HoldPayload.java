@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.UUID;
 
 /** What a hold was requested for, stored with it so the confirm can be matched (spec 8.6). */
-public record HoldPayload(UUID vehicleId, List<UUID> serviceTypeIds) {
+public record HoldPayload(UUID vehicleId, List<UUID> serviceTypeIds, UUID rescheduleOf) {
 
   private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -17,7 +17,12 @@ public record HoldPayload(UUID vehicleId, List<UUID> serviceTypeIds) {
 
   /** Creates the payload. */
   public static HoldPayload of(UUID vehicleId, List<UUID> serviceTypeIds) {
-    return new HoldPayload(vehicleId, serviceTypeIds);
+    return new HoldPayload(vehicleId, serviceTypeIds, null);
+  }
+
+  /** Creates the payload of a hold taken to reschedule the given appointment (may be null). */
+  public static HoldPayload of(UUID vehicleId, List<UUID> serviceTypeIds, UUID rescheduleOf) {
+    return new HoldPayload(vehicleId, serviceTypeIds, rescheduleOf);
   }
 
   /** JSON form stored in the hold hash. */

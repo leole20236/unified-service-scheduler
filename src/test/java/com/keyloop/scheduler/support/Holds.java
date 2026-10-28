@@ -50,6 +50,23 @@ public final class Holds {
     return Bookings.book(subject, body, "confirm-" + UUID.randomUUID());
   }
 
+  /** Requests a hold for rescheduling the given appointment. */
+  public static Response holdToReschedule(
+      UUID subject,
+      String appointmentId,
+      UUID dealership,
+      UUID vehicle,
+      Instant start,
+      UUID... services) {
+    Map<String, Object> body = body(dealership, vehicle, start, services);
+    body.put("rescheduleOf", appointmentId);
+    return given()
+        .headers(Headers.customer(subject))
+        .contentType(ContentType.JSON)
+        .body(body)
+        .post(ME);
+  }
+
   /** {@code GET /me/holds/{id}}. */
   public static Response get(UUID subject, String holdId) {
     return given().headers(Headers.customer(subject)).get(ME + "/" + holdId);

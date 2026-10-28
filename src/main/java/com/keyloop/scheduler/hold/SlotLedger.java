@@ -220,7 +220,6 @@ public class SlotLedger {
    * is free for {@code bayPeriod}; the user's previous hold of this day is released first. Writes
    * {@code holdref} after a grant.
    */
-  @SuppressWarnings("unchecked")
   public Optional<HeldPair> acquire(
       UUID dealershipId,
       LocalDate date,
@@ -229,6 +228,24 @@ public class SlotLedger {
       TimeRange period,
       TimeRange bayPeriod,
       String payloadJson) {
+    return acquire(
+        dealershipId, date, userId, rankedPairs, period, bayPeriod, payloadJson, Set.of());
+  }
+
+  /**
+   * As above, but confirmed intervals of {@code ignoredReservations} (the caller's own appointment
+   * being rescheduled) do not count as busy.
+   */
+  @SuppressWarnings("unchecked")
+  public Optional<HeldPair> acquire(
+      UUID dealershipId,
+      LocalDate date,
+      UUID userId,
+      List<ResourcePair> rankedPairs,
+      TimeRange period,
+      TimeRange bayPeriod,
+      String payloadJson,
+      Set<UUID> ignoredReservations) {
     LedgerKeys keys = LedgerKeys.of(dealershipId, date);
     UUID holdId = Ids.newId();
     List<String> args = new ArrayList<>();
@@ -242,6 +259,8 @@ public class SlotLedger {
     args.add(Long.toString(holdTtl.toMillis()));
     args.add(Long.toString(ledgerTtl.toMillis()));
     args.add(payloadJson);
+    args.add(Integer.toString(ignoredReservations.size()));
+    ignoredReservations.forEach(id -> args.add(id.toString()));
     for (ResourcePair pair : rankedPairs) {
       args.add(pair.bayId().toString());
       args.add(pair.technicianId().toString());
@@ -365,6 +384,16 @@ public class SlotLedger {
    */
   public Occupancy occupancy(
       UUID dealershipId, LocalDate date, boolean includeHolds, UUID ignoreUserHolds) {
+    return occupancy(dealershipId, date, includeHolds, ignoreUserHolds, Set.of());
+  }
+
+  /** As above, also leaving out the confirmed intervals of {@code ignoredReservations}. */
+  public Occupancy occupancy(
+      UUID dealershipId,
+      LocalDate date,
+      boolean includeHolds,
+      UUID ignoreUserHolds,
+      Set<UUID> ignoredReservations) {
     List<UUID> resources = resourceIds(catalogs.get(dealershipId));
     Map<UUID, List<Interval>> intervals =
         readIntervals(dealershipId, date, resources, ignoreUserHolds);
@@ -375,6 +404,7 @@ public class SlotLedger {
                 resource,
                 list.stream()
                     .filter(i -> includeHolds || !i.held())
+                    .filter(i -> i.held() || !ignoredReservations.contains(i.id()))
                     .map(Interval::range)
                     .toList()));
     return new Occupancy(byResource);

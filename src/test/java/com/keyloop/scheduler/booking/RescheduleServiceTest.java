@@ -147,7 +147,7 @@ class RescheduleServiceTest {
         HELD,
         period,
         period,
-        HoldPayload.of(Fixtures.ALICE_FOCUS, services).toJson(),
+        HoldPayload.of(Fixtures.ALICE_FOCUS, services, APPOINTMENT).toJson(),
         NOW.plusSeconds(600));
   }
 
@@ -470,5 +470,23 @@ class RescheduleServiceTest {
     assertThat(service().customerReschedule(alice, APPOINTMENT, 3, HOLD)).isSameAs(movedView);
     verify(ledger).markDirty(Fixtures.RIVERSIDE, WEDNESDAY);
     verify(ledger).markDirty(Fixtures.RIVERSIDE, THURSDAY);
+  }
+
+  @Test
+  void holdNotTakenForThisAppointmentIsHoldMismatch() {
+    StoredHold plain =
+        new StoredHold(
+            HOLD,
+            Fixtures.ALICE_SUB,
+            HELD,
+            THURSDAY_10,
+            THURSDAY_10,
+            HoldPayload.of(Fixtures.ALICE_FOCUS, List.of(Fixtures.OIL_CHANGE)).toJson(),
+            NOW.plusSeconds(600));
+    holdIs(Fixtures.RIVERSIDE, THURSDAY, plain);
+
+    assertThatThrownBy(() -> service().customerReschedule(alice, APPOINTMENT, 3, HOLD))
+        .isInstanceOfSatisfying(
+            ApiException.class, e -> assertThat(e.code()).isEqualTo(ProblemCodes.HOLD_MISMATCH));
   }
 }

@@ -2,18 +2,25 @@ package com.keyloop.scheduler.hold;
 
 import com.keyloop.scheduler.availability.AvailabilityCalculator;
 import com.keyloop.scheduler.booking.AllocationService;
+import com.keyloop.scheduler.booking.AppointmentRepository;
+import com.keyloop.scheduler.booking.AppointmentState;
+import com.keyloop.scheduler.booking.AppointmentStatus;
 import com.keyloop.scheduler.booking.BookingChannel;
 import com.keyloop.scheduler.booking.BookingPolicy;
 import com.keyloop.scheduler.booking.JobPlan;
 import com.keyloop.scheduler.booking.JobPlanner;
 import com.keyloop.scheduler.booking.Occupancy;
+import com.keyloop.scheduler.booking.ReservationRepository;
 import com.keyloop.scheduler.booking.ResourcePair;
 import com.keyloop.scheduler.booking.SlotMessages;
 import com.keyloop.scheduler.catalog.CatalogService;
 import com.keyloop.scheduler.catalog.DealershipView;
 import com.keyloop.scheduler.catalog.ResourceCatalog;
+import com.keyloop.scheduler.common.api.BusinessRuleException;
 import com.keyloop.scheduler.common.api.HoldsUnavailableException;
+import com.keyloop.scheduler.common.api.InvalidTransitionException;
 import com.keyloop.scheduler.common.api.NotFoundException;
+import com.keyloop.scheduler.common.api.ProblemCodes;
 import com.keyloop.scheduler.common.api.SlotUnavailableException;
 import com.keyloop.scheduler.common.security.CallerContext;
 import com.keyloop.scheduler.customer.CustomerService;
@@ -26,6 +33,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
@@ -51,13 +59,19 @@ public class HoldService {
   private final AllocationService allocation;
   private final CatalogService catalogs;
   private final CustomerService customers;
+  private final AppointmentRepository appointments;
+  private final ReservationRepository reservations;
 
   /** Creates the service. */
   public HoldService(
       SlotLedger ledger,
       AllocationService allocation,
       CatalogService catalogs,
-      CustomerService customers) {
+      CustomerService customers,
+      AppointmentRepository appointments,
+      ReservationRepository reservations) {
+    this.appointments = appointments;
+    this.reservations = reservations;
     this.ledger = ledger;
     this.allocation = allocation;
     this.catalogs = catalogs;
@@ -77,12 +91,13 @@ public class HoldService {
     JobPlan plan = JobPlanner.plan(catalog, req.serviceTypeIds(), req.start());
     DealershipView d = catalog.dealership();
     BookingPolicy policy = BookingChannel.CUSTOMER.policy();
+    Set<UUID> own = ownReservations(caller, req, d);
     return redis(
         () -> {
           Instant now = ledger.now();
           policy.checkNew(plan, d, now);
           LocalDate date = plan.localDate();
-          Occupancy occupied = occupancy(d, date, caller.userId());
+          Occupancy occupied = occupancy(d, date, caller.userId(), own);
           List<ResourcePair> ranked =
               allocation.rank(catalog, plan, occupied, Optional.empty(), Optional.empty());
           Optional<HeldPair> held =
@@ -93,13 +108,15 @@ public class HoldService {
                   ranked,
                   plan.period(),
                   plan.bayPeriod(),
-                  HoldPayload.of(req.vehicleId(), req.serviceTypeIds()).toJson());
+                  HoldPayload.of(req.vehicleId(), req.serviceTypeIds(), req.rescheduleOf())
+                      .toJson(),
+                  own);
           if (held.isEmpty()) {
             List<Instant> alternatives =
                 AvailabilityCalculator.alternatives(
                         catalog,
                         plan,
-                        day -> occupancy(d, day, caller.userId()),
+                        day -> occupancy(d, day, caller.userId(), own),
                         policy.earliestStart(now),
                         policy.latestStart(now),
                         MAX_ALTERNATIVES)
@@ -154,9 +171,39 @@ public class HoldService {
   /** A stored hold with the dealership it was found under. */
   private record LocatedHold(UUID dealershipId, StoredHold hold) {}
 
-  private Occupancy occupancy(DealershipView d, LocalDate date, UUID viewer) {
+  private Occupancy occupancy(DealershipView d, LocalDate date, UUID viewer, Set<UUID> own) {
     ledger.ensureLoaded(d.id(), date, SlotLedger.dayWindow(d, date));
-    return ledger.occupancy(d.id(), date, true, viewer);
+    return own.isEmpty()
+        ? ledger.occupancy(d.id(), date, true, viewer)
+        : ledger.occupancy(d.id(), date, true, viewer, own);
+  }
+
+  /**
+   * For a hold taken to reschedule: the reservation ids of the caller's own BOOKED appointment at
+   * this dealership, whose current slot must not count as taken. Someone else's appointment is a
+   * 404. Empty for an ordinary hold.
+   */
+  private Set<UUID> ownReservations(CallerContext caller, HoldRequest req, DealershipView d) {
+    if (req.rescheduleOf() == null) {
+      return Set.of();
+    }
+    UUID customerId = customers.currentCustomer(caller);
+    AppointmentState state =
+        appointments
+            .findState(req.rescheduleOf())
+            .filter(s -> s.customerId().equals(customerId))
+            .orElseThrow(
+                () ->
+                    new NotFoundException("Appointment " + req.rescheduleOf() + " was not found."));
+    if (state.status() != AppointmentStatus.BOOKED) {
+      throw new InvalidTransitionException(
+          "Only booked appointments can be changed here; this one is " + state.status() + ".");
+    }
+    if (!state.dealershipId().equals(d.id())) {
+      throw new BusinessRuleException(
+          ProblemCodes.HOLD_MISMATCH, "That appointment is at another dealership.");
+    }
+    return Set.copyOf(reservations.activeIds(state.id()));
   }
 
   /**

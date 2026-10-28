@@ -12,6 +12,7 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.UUID;
 import org.slf4j.Logger;
@@ -92,21 +93,34 @@ public class CustomerCancelService {
       UUID dealershipId, LocalDate localDate, List<UUID> reservationIds, AppointmentView view) {}
 
   private Cancelled persist(UUID customerId, UUID appointmentId, OptionalLong expectedVersion) {
-    AppointmentState state =
-        appointments
-            .findState(appointmentId)
-            .filter(s -> s.customerId().equals(customerId))
-            .orElseThrow(() -> ChangeDiagnosis.notFound(appointmentId));
-    // Writers of these resources queue on the advisory locks before any row is touched (spec 8.1).
-    locks.lockAll(List.of(state.serviceBayId(), state.technicianId()));
-    OptionalLong version = appointments.markCancelled(appointmentId, customerId, expectedVersion);
-    if (version.isEmpty()) {
-      throw ChangeDiagnosis.of(
-          appointmentId,
-          customerId,
-          expectedVersion,
-          appointments.findState(appointmentId),
-          clock.now());
+    AppointmentState state = owned(customerId, appointmentId);
+    OptionalLong version;
+    while (true) {
+      // Writers of these resources queue on the advisory locks before any row is touched (8.1).
+      locks.lockAll(List.of(state.serviceBayId(), state.technicianId()));
+      // Guarded by the version this state was read at, so the event, the reservations
+      // deactivated and the ledger date below all describe the state that is cancelled.
+      version =
+          appointments.markCancelled(
+              appointmentId,
+              customerId,
+              expectedVersion.isPresent() ? expectedVersion : OptionalLong.of(state.version()));
+      if (version.isPresent()) {
+        break;
+      }
+      Optional<AppointmentState> current = appointments.findState(appointmentId);
+      long readAt = state.version();
+      boolean movedUnderUs =
+          expectedVersion.isEmpty()
+              && current
+                  .filter(c -> c.customerId().equals(customerId) && c.version() != readAt)
+                  .isPresent();
+      if (!movedUnderUs) {
+        throw ChangeDiagnosis.of(appointmentId, customerId, expectedVersion, current, clock.now());
+      }
+      // A concurrent change (a reschedule) committed while we queued: decide on its result,
+      // locking the resources it moved the appointment to.
+      state = current.orElseThrow();
     }
     List<UUID> reservationIds = reservations.deactivate(appointmentId);
     ZoneId zone = catalogs.get(state.dealershipId()).dealership().zoneId();
@@ -131,6 +145,13 @@ public class CustomerCancelService {
         state.period().start().atZone(zone).toLocalDate(),
         reservationIds,
         view);
+  }
+
+  private AppointmentState owned(UUID customerId, UUID appointmentId) {
+    return appointments
+        .findState(appointmentId)
+        .filter(s -> s.customerId().equals(customerId))
+        .orElseThrow(() -> ChangeDiagnosis.notFound(appointmentId));
   }
 
   /**

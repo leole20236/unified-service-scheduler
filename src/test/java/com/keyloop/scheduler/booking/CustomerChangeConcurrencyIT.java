@@ -111,16 +111,18 @@ class CustomerChangeConcurrencyIT extends IntegrationTest {
     // One hold per user and day: two holds on different days.
     List<String> holds =
         List.of(
-            Holds.hold(
+            Holds.holdToReschedule(
                     Fixtures.ALICE_SUB,
+                    id,
                     Fixtures.SOLO,
                     Fixtures.ALICE_FOCUS,
                     thursday,
                     Fixtures.OIL_CHANGE)
                 .jsonPath()
                 .getString("id"),
-            Holds.hold(
+            Holds.holdToReschedule(
                     Fixtures.ALICE_SUB,
+                    id,
                     Fixtures.SOLO,
                     Fixtures.ALICE_FOCUS,
                     friday,
@@ -159,6 +161,60 @@ class CustomerChangeConcurrencyIT extends IntegrationTest {
                 "SELECT count(*) FROM outbox_event WHERE event_type = 'AppointmentRescheduled'",
                 Integer.class))
         .isEqualTo(1);
+    NoDoubleBookingAssert.verify(client);
+  }
+
+  @RepeatedTest(5)
+  void cancelRacingRescheduleLeavesNoPhantomOccupancy() {
+    String id = aliceBooksSolo();
+    Instant thursday = at(WEDNESDAY.plusDays(1), 11, 0, LONDON);
+    String hold =
+        Holds.holdToReschedule(
+                Fixtures.ALICE_SUB,
+                id,
+                Fixtures.SOLO,
+                Fixtures.ALICE_FOCUS,
+                thursday,
+                Fixtures.OIL_CHANGE)
+            .jsonPath()
+            .getString("id");
+
+    List<Response> responses =
+        ConcurrencyHarness.race(
+            2,
+            i ->
+                i == 0
+                    ? given()
+                        .headers(Headers.customer(Fixtures.ALICE_SUB))
+                        .post(ME + "/" + id + "/cancel")
+                    : given()
+                        .headers(Headers.customer(Fixtures.ALICE_SUB))
+                        .header("If-Match", "\"0\"")
+                        .contentType(ContentType.JSON)
+                        .body(Map.of("holdId", hold))
+                        .post(ME + "/" + id + "/reschedule"));
+
+    // Whatever the order, the appointment ends cancelled with nothing reserved, and the
+    // cancellation event describes the slot that was actually cancelled.
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT status FROM appointment WHERE id = ?::uuid", String.class, id))
+        .isEqualTo("CANCELLED");
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT count(*) FROM resource_reservation WHERE active", Integer.class))
+        .isZero();
+    String eventStart =
+        jdbc.queryForObject(
+            "SELECT payload->'data'->>'start' FROM outbox_event"
+                + " WHERE event_type = 'AppointmentCancelled'",
+            String.class);
+    Instant cancelledStart =
+        jdbc.queryForObject(
+                "SELECT start_at FROM appointment WHERE id = ?::uuid", java.sql.Timestamp.class, id)
+            .toInstant();
+    assertThat(Instant.parse(eventStart)).isEqualTo(cancelledStart);
+    assertThat(responses.stream().map(Response::statusCode)).contains(200);
     NoDoubleBookingAssert.verify(client);
   }
 }

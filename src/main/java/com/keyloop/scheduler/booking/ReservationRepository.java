@@ -115,6 +115,14 @@ public class ReservationRepository {
     return moved;
   }
 
+  /** Ids of the appointment's active reservations. */
+  public List<UUID> activeIds(UUID appointmentId) {
+    return jdbc.queryForList(
+        "SELECT id FROM resource_reservation WHERE appointment_id = ? AND active",
+        UUID.class,
+        appointmentId);
+  }
+
   /** Deactivates the appointment's active reservations; returns their ids. */
   public List<UUID> deactivate(UUID appointmentId) {
     return jdbc.queryForList(

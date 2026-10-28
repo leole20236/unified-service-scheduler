@@ -12,6 +12,7 @@ import com.keyloop.scheduler.common.api.SlotUnavailableException;
 import com.keyloop.scheduler.common.db.SqlStates;
 import com.keyloop.scheduler.common.security.CallerContext;
 import com.keyloop.scheduler.common.time.DbClock;
+import com.keyloop.scheduler.common.time.TimeRange;
 import com.keyloop.scheduler.customer.CustomerService;
 import com.keyloop.scheduler.hold.HoldPayload;
 import com.keyloop.scheduler.hold.LedgerFailures;
@@ -21,6 +22,7 @@ import com.keyloop.scheduler.hold.SlotLedger.StoredHold;
 import com.keyloop.scheduler.outbox.OutboxWriter;
 import com.keyloop.scheduler.query.AppointmentReadRepository;
 import com.keyloop.scheduler.query.AppointmentView;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
@@ -128,7 +130,11 @@ public class RescheduleService {
 
   /** What the conflict handler needs to explain a refusal. */
   private record Planned(
-      UUID dealershipId, ResourceCatalog catalog, JobPlan plan, LocalDate newDate) {}
+      UUID dealershipId,
+      ResourceCatalog catalog,
+      JobPlan plan,
+      LocalDate newDate,
+      AppointmentState current) {}
 
   /** What a committed reschedule produced. */
   private record Moved(
@@ -169,7 +175,7 @@ public class RescheduleService {
     BookingChannel.CUSTOMER
         .policy()
         .checkChange(state.status(), state.period(), plan, dealership, now);
-    planned.set(new Planned(state.dealershipId(), catalog, plan, plan.localDate()));
+    planned.set(new Planned(state.dealershipId(), catalog, plan, plan.localDate(), state));
     ResourcePair pair = hold.pair();
     locks.lockAll(
         List.of(state.serviceBayId(), state.technicianId(), pair.bayId(), pair.technicianId()));
@@ -267,7 +273,14 @@ public class RescheduleService {
       throw new BusinessRuleException(
           ProblemCodes.HOLD_MISMATCH, "Your hold is for another dealership.");
     }
-    List<UUID> heldServices = HoldPayload.parse(h.payloadJson()).serviceTypeIds();
+    HoldPayload payload = HoldPayload.parse(h.payloadJson());
+    if (!appointmentId.equals(payload.rescheduleOf())) {
+      throw new BusinessRuleException(
+          ProblemCodes.HOLD_MISMATCH,
+          "Your hold was not taken for rescheduling this appointment; hold again with"
+              + " rescheduleOf.");
+    }
+    List<UUID> heldServices = payload.serviceTypeIds();
     if (!new HashSet<>(heldServices).equals(new HashSet<>(serviceTypeIds))) {
       throw new BusinessRuleException(
           ProblemCodes.HOLD_MISMATCH,
@@ -311,7 +324,8 @@ public class RescheduleService {
         AvailabilityCalculator.alternatives(
                 p.catalog(),
                 p.plan(),
-                date -> dailyOccupancy.forDay(d.id(), date, d, caller.userId()),
+                date ->
+                    withoutOwnSlot(dailyOccupancy.forDay(d.id(), date, d, caller.userId()), p, d),
                 policy.earliestStart(now),
                 policy.latestStart(now),
                 MAX_ALTERNATIVES)
@@ -319,5 +333,12 @@ public class RescheduleService {
             .map(OffsetDateTime::toInstant)
             .toList();
     return new SlotUnavailableException(SlotMessages.unavailable(p.plan(), d), alternatives, null);
+  }
+
+  /** The appointment's own current slot is not taken from its own point of view. */
+  private static Occupancy withoutOwnSlot(Occupancy occupied, Planned p, DealershipView d) {
+    AppointmentState own = p.current();
+    TimeRange bay = own.period().extendEnd(Duration.ofMinutes(d.bayBufferMinutes()));
+    return occupied.minus(own.serviceBayId(), bay).minus(own.technicianId(), own.period());
   }
 }

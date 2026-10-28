@@ -44,4 +44,13 @@ public record Occupancy(Map<UUID, List<TimeRange>> byResource) {
     copy.put(resourceId, ranges);
     return new Occupancy(copy);
   }
+
+  /** A copy without one reservation equal to {@code r} (the caller's own, when it moves). */
+  public Occupancy minus(UUID resourceId, TimeRange r) {
+    Map<UUID, List<TimeRange>> copy = new HashMap<>(byResource);
+    List<TimeRange> ranges = new ArrayList<>(copy.getOrDefault(resourceId, List.of()));
+    ranges.remove(r);
+    copy.put(resourceId, ranges);
+    return new Occupancy(copy);
+  }
 }

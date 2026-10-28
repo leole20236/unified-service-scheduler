@@ -59,6 +59,7 @@ class HoldServiceTest {
   private static final LocalDate MONDAY = LocalDate.of(2026, 11, 2);
   private static final Instant EXPIRES = Instant.parse("2026-11-01T10:10:00Z");
   private static final UUID HOLD = UUID.fromString("0192f0b9-0000-7000-8000-000000000001");
+  private static final UUID APPOINTMENT = UUID.fromString("0192f0b9-0000-7000-8000-0000000000a1");
   private static final ResourcePair PAIR = new ResourcePair(Fixtures.RIVERSIDE_BAY_1, Fixtures.SAM);
   private static final TimeRange PERIOD =
       new TimeRange(MONDAY_9.toInstant(), Instant.parse("2026-11-02T09:45:00Z"));
@@ -67,7 +68,12 @@ class HoldServiceTest {
   private final AllocationService allocation = mock(AllocationService.class);
   private final CatalogService catalogs = mock(CatalogService.class);
   private final CustomerService customers = mock(CustomerService.class);
-  private final HoldService service = new HoldService(ledger, allocation, catalogs, customers);
+  private final com.keyloop.scheduler.booking.AppointmentRepository appointments =
+      mock(com.keyloop.scheduler.booking.AppointmentRepository.class);
+  private final com.keyloop.scheduler.booking.ReservationRepository reservations =
+      mock(com.keyloop.scheduler.booking.ReservationRepository.class);
+  private final HoldService service =
+      new HoldService(ledger, allocation, catalogs, customers, appointments, reservations);
 
   private final CallerContext alice =
       new CallerContext(Fixtures.ALICE_SUB, Set.of(Role.CUSTOMER), Set.of());
@@ -81,7 +87,7 @@ class HoldServiceTest {
       new VehicleView(Fixtures.ALICE_FOCUS, "VIN", "ALI 1", "Ford", "Focus", 2018, 1);
 
   private static HoldRequest request(OffsetDateTime start, List<UUID> services) {
-    return new HoldRequest(Fixtures.RIVERSIDE, Fixtures.ALICE_FOCUS, services, start);
+    return new HoldRequest(Fixtures.RIVERSIDE, Fixtures.ALICE_FOCUS, services, start, null);
   }
 
   private static HoldRequest oilAt(OffsetDateTime start) {
@@ -99,7 +105,7 @@ class HoldServiceTest {
 
   @Test
   void grantedHoldReturnsItsTimesAndExpiry() {
-    when(ledger.acquire(any(), any(), any(), any(), any(), any(), anyString()))
+    when(ledger.acquire(any(), any(), any(), any(), any(), any(), anyString(), any()))
         .thenReturn(Optional.of(new HeldPair(HOLD, PAIR, EXPIRES)));
 
     HoldView view = service.create(alice, oilAt(MONDAY_9));
@@ -120,7 +126,8 @@ class HoldServiceTest {
             eq(List.of(PAIR)),
             eq(PERIOD),
             eq(PERIOD),
-            eq(HoldPayload.of(Fixtures.ALICE_FOCUS, List.of(Fixtures.OIL_CHANGE)).toJson()));
+            eq(HoldPayload.of(Fixtures.ALICE_FOCUS, List.of(Fixtures.OIL_CHANGE)).toJson()),
+            eq(java.util.Set.of()));
     verify(customers, never()).getMyVehicle(any(), any());
   }
 
@@ -134,7 +141,7 @@ class HoldServiceTest {
 
   @Test
   void noFreePairIsSlotUnavailableWithAlternativesFromTheLedger() {
-    when(ledger.acquire(any(), any(), any(), any(), any(), any(), anyString()))
+    when(ledger.acquire(any(), any(), any(), any(), any(), any(), anyString(), any()))
         .thenReturn(Optional.empty());
     Occupancy samBusyTillTen =
         new Occupancy(
@@ -167,7 +174,7 @@ class HoldServiceTest {
 
   @Test
   void redisConnectionFailureIsHoldsUnavailable() {
-    when(ledger.acquire(any(), any(), any(), any(), any(), any(), anyString()))
+    when(ledger.acquire(any(), any(), any(), any(), any(), any(), anyString(), any()))
         .thenThrow(new RedisConnectionFailureException("down"));
 
     assertThatThrownBy(() -> service.create(alice, oilAt(MONDAY_9)))
@@ -188,7 +195,7 @@ class HoldServiceTest {
         .isInstanceOf(HoldsUnavailableException.class);
 
     doReturn(NOW).when(ledger).now();
-    when(ledger.acquire(any(), any(), any(), any(), any(), any(), anyString()))
+    when(ledger.acquire(any(), any(), any(), any(), any(), any(), anyString(), any()))
         .thenThrow(new RedisSystemException("ERR script", new RuntimeException()));
     assertThatThrownBy(() -> service.create(alice, oilAt(MONDAY_9)))
         .isInstanceOf(HoldsUnavailableException.class);
@@ -202,17 +209,17 @@ class HoldServiceTest {
 
     assertThatThrownBy(() -> service.create(alice, oilAt(MONDAY_9)))
         .isInstanceOf(HoldsUnavailableException.class);
-    verify(ledger, never()).acquire(any(), any(), any(), any(), any(), any(), anyString());
+    verify(ledger, never()).acquire(any(), any(), any(), any(), any(), any(), anyString(), any());
   }
 
   @Test
   void oneTimeoutIsRetried() {
-    when(ledger.acquire(any(), any(), any(), any(), any(), any(), anyString()))
+    when(ledger.acquire(any(), any(), any(), any(), any(), any(), anyString(), any()))
         .thenThrow(new QueryTimeoutException("slow"))
         .thenReturn(Optional.of(new HeldPair(HOLD, PAIR, EXPIRES)));
 
     assertThat(service.create(alice, oilAt(MONDAY_9)).holdId()).isEqualTo(HOLD);
-    verify(ledger, times(2)).acquire(any(), any(), any(), any(), any(), any(), anyString());
+    verify(ledger, times(2)).acquire(any(), any(), any(), any(), any(), any(), anyString(), any());
   }
 
   @Test
@@ -226,7 +233,7 @@ class HoldServiceTest {
 
   @Test
   void otherFailuresAreNotDisguisedAsHoldsUnavailable() {
-    when(ledger.acquire(any(), any(), any(), any(), any(), any(), anyString()))
+    when(ledger.acquire(any(), any(), any(), any(), any(), any(), anyString(), any()))
         .thenThrow(new IllegalStateException("bug"));
 
     assertThatThrownBy(() -> service.create(alice, oilAt(MONDAY_9)))
@@ -250,7 +257,7 @@ class HoldServiceTest {
             e -> assertThat(e.code()).isEqualTo(ProblemCodes.OUTSIDE_BOOKING_WINDOW));
 
     verify(ledger, never()).ensureLoaded(any(), any(), any());
-    verify(ledger, never()).acquire(any(), any(), any(), any(), any(), any(), anyString());
+    verify(ledger, never()).acquire(any(), any(), any(), any(), any(), any(), anyString(), any());
   }
 
   @Test
@@ -343,5 +350,104 @@ class HoldServiceTest {
     HoldPayload payload = HoldPayload.of(Fixtures.ALICE_FOCUS, List.of(Fixtures.OIL_CHANGE));
 
     assertThat(HoldPayload.parse(payload.toJson())).isEqualTo(payload);
+  }
+
+  private static com.keyloop.scheduler.booking.AppointmentState appointment(
+      UUID customer, UUID dealership, com.keyloop.scheduler.booking.AppointmentStatus status) {
+    return new com.keyloop.scheduler.booking.AppointmentState(
+        APPOINTMENT,
+        customer,
+        dealership,
+        status,
+        0,
+        PERIOD,
+        Fixtures.RIVERSIDE_BAY_1,
+        Fixtures.SAM);
+  }
+
+  private HoldRequest rescheduleRequest() {
+    return new HoldRequest(
+        Fixtures.RIVERSIDE,
+        Fixtures.ALICE_FOCUS,
+        List.of(Fixtures.OIL_CHANGE),
+        MONDAY_9,
+        APPOINTMENT);
+  }
+
+  @Test
+  void rescheduleHoldIgnoresTheOwnReservationsAndRemembersTheAppointment() {
+    UUID reservation = UUID.randomUUID();
+    when(customers.currentCustomer(alice)).thenReturn(Fixtures.ALICE);
+    when(appointments.findState(APPOINTMENT))
+        .thenReturn(
+            Optional.of(
+                appointment(
+                    Fixtures.ALICE,
+                    Fixtures.RIVERSIDE,
+                    com.keyloop.scheduler.booking.AppointmentStatus.BOOKED)));
+    when(reservations.activeIds(APPOINTMENT)).thenReturn(List.of(reservation));
+    when(ledger.occupancy(any(), any(), eq(true), any(), any())).thenReturn(Occupancy.empty());
+    when(ledger.acquire(any(), any(), any(), any(), any(), any(), anyString(), any()))
+        .thenReturn(Optional.of(new HeldPair(HOLD, PAIR, Instant.parse("2026-11-01T10:10:00Z"))));
+
+    service.create(alice, rescheduleRequest());
+
+    verify(ledger)
+        .acquire(
+            any(),
+            any(),
+            any(),
+            any(),
+            any(),
+            any(),
+            eq(
+                HoldPayload.of(Fixtures.ALICE_FOCUS, List.of(Fixtures.OIL_CHANGE), APPOINTMENT)
+                    .toJson()),
+            eq(java.util.Set.of(reservation)));
+    verify(ledger).occupancy(any(), any(), eq(true), any(), eq(java.util.Set.of(reservation)));
+  }
+
+  @Test
+  void rescheduleHoldForOthersOrMissingAppointmentIs404() {
+    when(customers.currentCustomer(alice)).thenReturn(Fixtures.ALICE);
+    when(appointments.findState(APPOINTMENT))
+        .thenReturn(
+            Optional.of(
+                appointment(
+                    Fixtures.BOB,
+                    Fixtures.RIVERSIDE,
+                    com.keyloop.scheduler.booking.AppointmentStatus.BOOKED)),
+            Optional.empty());
+
+    org.assertj.core.api.Assertions.assertThatThrownBy(
+            () -> service.create(alice, rescheduleRequest()))
+        .isInstanceOf(NotFoundException.class);
+    org.assertj.core.api.Assertions.assertThatThrownBy(
+            () -> service.create(alice, rescheduleRequest()))
+        .isInstanceOf(NotFoundException.class);
+  }
+
+  @Test
+  void rescheduleHoldNeedsBookedAppointmentAtTheSameDealership() {
+    when(customers.currentCustomer(alice)).thenReturn(Fixtures.ALICE);
+    when(appointments.findState(APPOINTMENT))
+        .thenReturn(
+            Optional.of(
+                appointment(
+                    Fixtures.ALICE,
+                    Fixtures.RIVERSIDE,
+                    com.keyloop.scheduler.booking.AppointmentStatus.CANCELLED)),
+            Optional.of(
+                appointment(
+                    Fixtures.ALICE,
+                    Fixtures.HUDSON,
+                    com.keyloop.scheduler.booking.AppointmentStatus.BOOKED)));
+
+    org.assertj.core.api.Assertions.assertThatThrownBy(
+            () -> service.create(alice, rescheduleRequest()))
+        .isInstanceOf(com.keyloop.scheduler.common.api.InvalidTransitionException.class);
+    org.assertj.core.api.Assertions.assertThatThrownBy(
+            () -> service.create(alice, rescheduleRequest()))
+        .isInstanceOf(com.keyloop.scheduler.common.api.BusinessRuleException.class);
   }
 }

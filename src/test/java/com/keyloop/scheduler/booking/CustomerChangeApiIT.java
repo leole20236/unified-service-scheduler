@@ -52,10 +52,15 @@ class CustomerChangeApiIT extends IntegrationTest {
     return r.jsonPath().getString("id");
   }
 
-  private static String aliceHolds(Instant start) {
+  private static String aliceHolds(String appointmentId, Instant start) {
     Response r =
-        Holds.hold(
-            Fixtures.ALICE_SUB, Fixtures.SOLO, Fixtures.ALICE_FOCUS, start, Fixtures.OIL_CHANGE);
+        Holds.holdToReschedule(
+            Fixtures.ALICE_SUB,
+            appointmentId,
+            Fixtures.SOLO,
+            Fixtures.ALICE_FOCUS,
+            start,
+            Fixtures.OIL_CHANGE);
     assertThat(r.statusCode()).as(r.asString()).isEqualTo(201);
     return r.jsonPath().getString("id");
   }
@@ -91,7 +96,7 @@ class CustomerChangeApiIT extends IntegrationTest {
   @Test
   void rescheduleMovesBothReservations() {
     String id = aliceBooksSolo(WED_NINE);
-    String holdId = aliceHolds(THU_ELEVEN);
+    String holdId = aliceHolds(id, THU_ELEVEN);
     // Loads Wednesday's ledger: Bob is refused 09:00 while Alice holds it.
     Holds.hold(Fixtures.BOB_SUB, Fixtures.SOLO, Fixtures.BOB_GOLF, WED_NINE, Fixtures.OIL_CHANGE)
         .then()
@@ -149,7 +154,7 @@ class CustomerChangeApiIT extends IntegrationTest {
   @Test
   void rescheduleStaleVersion412() {
     String id = aliceBooksSolo(WED_NINE);
-    String holdId = aliceHolds(THU_ELEVEN);
+    String holdId = aliceHolds(id, THU_ELEVEN);
 
     reschedule(Fixtures.ALICE_SUB, id, "\"5\"", holdId)
         .then()
@@ -164,7 +169,7 @@ class CustomerChangeApiIT extends IntegrationTest {
   @Test
   void rescheduleWithoutIfMatch428() {
     String id = aliceBooksSolo(WED_NINE);
-    String holdId = aliceHolds(THU_ELEVEN);
+    String holdId = aliceHolds(id, THU_ELEVEN);
 
     reschedule(Fixtures.ALICE_SUB, id, null, holdId)
         .then()
@@ -177,7 +182,7 @@ class CustomerChangeApiIT extends IntegrationTest {
   void rescheduleWithin24hIs422() {
     String id = aliceBooksSolo(WED_NINE);
     startsInFiveHours(id);
-    String holdId = aliceHolds(THU_ELEVEN);
+    String holdId = aliceHolds(id, THU_ELEVEN);
 
     reschedule(Fixtures.ALICE_SUB, id, "\"0\"", holdId)
         .then()
@@ -189,7 +194,7 @@ class CustomerChangeApiIT extends IntegrationTest {
   @Test
   void rescheduleOthersIs404AndForeignHoldIs404() {
     String id = aliceBooksSolo(WED_NINE);
-    String holdId = aliceHolds(THU_ELEVEN);
+    String holdId = aliceHolds(id, THU_ELEVEN);
 
     reschedule(Fixtures.BOB_SUB, id, "\"0\"", holdId).then().statusCode(404);
     String bobHold =
@@ -208,8 +213,9 @@ class CustomerChangeApiIT extends IntegrationTest {
   void rescheduleWithHoldForOtherServicesIs422() {
     String id = aliceBooksSolo(WED_NINE);
     String holdId =
-        Holds.hold(
+        Holds.holdToReschedule(
                 Fixtures.ALICE_SUB,
+                id,
                 Fixtures.SOLO,
                 Fixtures.ALICE_FOCUS,
                 THU_ELEVEN,
@@ -226,7 +232,7 @@ class CustomerChangeApiIT extends IntegrationTest {
   @Test
   void rescheduleOntoSlotTakenMeanwhileIs409WithAlternatives() {
     String id = aliceBooksSolo(WED_NINE);
-    String holdId = aliceHolds(THU_ELEVEN);
+    String holdId = aliceHolds(id, THU_ELEVEN);
     // A direct booking ignores holds; the database decides.
     book(
             Fixtures.BOB_SUB,
@@ -330,5 +336,88 @@ class CustomerChangeApiIT extends IntegrationTest {
         .statusCode(422)
         .body("code", equalTo("CHANGE_WINDOW_CLOSED"))
         .body("detail", containsString("starts in 4 hours"));
+  }
+
+  @Test
+  void rescheduleToOverlapOwnSlotWorks() {
+    String id = aliceBooksSolo(WED_NINE);
+    Instant quarterPast = WED_NINE.plusSeconds(15 * 60);
+    // Without rescheduleOf the ledger refuses the overlap with the own slot.
+    Holds.hold(
+            Fixtures.ALICE_SUB,
+            Fixtures.SOLO,
+            Fixtures.ALICE_FOCUS,
+            quarterPast,
+            Fixtures.OIL_CHANGE)
+        .then()
+        .statusCode(409);
+    String holdId = aliceHolds(id, quarterPast);
+
+    reschedule(Fixtures.ALICE_SUB, id, "\"0\"", holdId)
+        .then()
+        .statusCode(200)
+        .header("ETag", "\"1\"")
+        .body("version", equalTo(1))
+        .body("start", equalTo(quarterPast.toString()));
+    assertThat(
+            jdbc.queryForList(
+                "SELECT start_at FROM resource_reservation WHERE appointment_id = ?::uuid"
+                    + " AND active",
+                Timestamp.class,
+                id))
+        .hasSize(2)
+        .allSatisfy(t -> assertThat(t.toInstant()).isEqualTo(quarterPast));
+    NoDoubleBookingAssert.verify(JdbcClient.create(jdbc));
+  }
+
+  @Test
+  void rescheduleOfSomeoneElsesAppointmentIs404() {
+    String id = aliceBooksSolo(WED_NINE);
+
+    Holds.holdToReschedule(
+            Fixtures.BOB_SUB, id, Fixtures.SOLO, Fixtures.BOB_GOLF, THU_ELEVEN, Fixtures.OIL_CHANGE)
+        .then()
+        .statusCode(404);
+  }
+
+  @Test
+  void rescheduleWithPlainHoldIs422() {
+    String id = aliceBooksSolo(WED_NINE);
+    String plain =
+        Holds.hold(
+                Fixtures.ALICE_SUB,
+                Fixtures.SOLO,
+                Fixtures.ALICE_FOCUS,
+                THU_ELEVEN,
+                Fixtures.OIL_CHANGE)
+            .jsonPath()
+            .getString("id");
+
+    reschedule(Fixtures.ALICE_SUB, id, "\"0\"", plain)
+        .then()
+        .statusCode(422)
+        .body("code", equalTo("HOLD_MISMATCH"));
+  }
+
+  @Test
+  void alternativesAfterConflictDoNotCountTheOwnSlot() {
+    Instant noon = at(WEDNESDAY, 12, 0, LONDON);
+    Instant quarterPastEleven = at(WEDNESDAY, 11, 15, LONDON);
+    Instant bobStart = at(WEDNESDAY, 10, 45, LONDON);
+    String id = aliceBooksSolo(noon);
+    String holdId = aliceHolds(id, quarterPastEleven);
+    book(
+            Fixtures.BOB_SUB,
+            body(Fixtures.SOLO, Fixtures.BOB_GOLF, bobStart, Fixtures.OIL_CHANGE),
+            "bob")
+        .then()
+        .statusCode(201);
+
+    Response refused = reschedule(Fixtures.ALICE_SUB, id, "\"0\"", holdId);
+
+    refused.then().statusCode(409).body("code", equalTo("SLOT_UNAVAILABLE"));
+    // 11:30 overlaps only Alice's own 12:00 slot, so it is offered.
+    assertThat(refused.jsonPath().getList("alternatives", String.class))
+        .contains(at(WEDNESDAY, 11, 30, LONDON).toString());
   }
 }

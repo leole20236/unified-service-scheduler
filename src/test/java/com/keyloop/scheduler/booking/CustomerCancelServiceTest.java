@@ -111,7 +111,7 @@ class CustomerCancelServiceTest {
     when(appointments.findState(APPOINTMENT))
         .thenReturn(Optional.of(state(Fixtures.ALICE, AppointmentStatus.BOOKED, 3, WEDNESDAY_9)));
     when(reads.find(APPOINTMENT)).thenReturn(Optional.of(cancelledView));
-    when(appointments.markCancelled(APPOINTMENT, Fixtures.ALICE, OptionalLong.empty()))
+    when(appointments.markCancelled(APPOINTMENT, Fixtures.ALICE, OptionalLong.of(3)))
         .thenReturn(OptionalLong.of(4));
     when(reservations.deactivate(APPOINTMENT)).thenReturn(List.of(RESERVATION_1, RESERVATION_2));
     org.mockito.Mockito.doAnswer(
@@ -246,5 +246,61 @@ class CustomerCancelServiceTest {
     doThrow(new IllegalStateException("redis down")).when(ledger).markDirty(any(), any());
 
     assertThat(service().cancel(alice, APPOINTMENT)).isSameAs(cancelledView);
+  }
+
+  @Test
+  void cancelQueuedBehindRescheduleDecidesOnTheMovedAppointment() {
+    TimeRange thursday =
+        new TimeRange(Instant.parse("2026-11-05T11:00:00Z"), Instant.parse("2026-11-05T11:45:00Z"));
+    AppointmentState moved =
+        new AppointmentState(
+            APPOINTMENT,
+            Fixtures.ALICE,
+            Fixtures.RIVERSIDE,
+            AppointmentStatus.BOOKED,
+            4,
+            thursday,
+            Fixtures.RIVERSIDE_BAY_2,
+            Fixtures.TOM);
+    when(appointments.findState(APPOINTMENT))
+        .thenReturn(
+            Optional.of(state(Fixtures.ALICE, AppointmentStatus.BOOKED, 3, WEDNESDAY_9)),
+            Optional.of(moved));
+    when(appointments.markCancelled(APPOINTMENT, Fixtures.ALICE, OptionalLong.of(3)))
+        .thenReturn(OptionalLong.empty());
+    when(appointments.markCancelled(APPOINTMENT, Fixtures.ALICE, OptionalLong.of(4)))
+        .thenReturn(OptionalLong.of(5));
+
+    service().cancel(alice, APPOINTMENT);
+
+    ArgumentCaptor<java.util.Collection<UUID>> locked =
+        ArgumentCaptor.forClass(java.util.Collection.class);
+    verify(locks, org.mockito.Mockito.times(2)).lockAll(locked.capture());
+    assertThat(locked.getAllValues().get(1))
+        .containsExactlyInAnyOrder(Fixtures.RIVERSIDE_BAY_2, Fixtures.TOM);
+    verify(outbox)
+        .append(
+            eq("Appointment"),
+            eq(APPOINTMENT),
+            eq(Fixtures.RIVERSIDE),
+            eq("AppointmentCancelled"),
+            eq(5L),
+            eq(
+                new AppointmentCancelledEvent(
+                    APPOINTMENT,
+                    Fixtures.ALICE,
+                    thursday.start(),
+                    thursday.end(),
+                    Fixtures.RIVERSIDE_BAY_2,
+                    Fixtures.TOM,
+                    "Europe/London",
+                    "CANCELLED")));
+    verify(ledger)
+        .applyCommitted(
+            eq(Fixtures.RIVERSIDE),
+            eq(LocalDate.of(2026, 11, 5)),
+            eq(List.of(RESERVATION_1, RESERVATION_2)),
+            eq(Map.of()));
+    verify(ledger, never()).applyCommitted(any(), eq(LocalDate.of(2026, 11, 4)), any(), any());
   }
 }

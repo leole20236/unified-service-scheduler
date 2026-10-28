@@ -1,13 +1,20 @@
 -- Atomically grants a hold on the first free (bay, technician) pair of one dealership-day.
 -- KEYS[1] userhold:{tag}:<userId>   KEYS[2] hold:{tag}:<holdId> (new hold)
 -- ARGV: 1 tag, 2 userId, 3 holdId, 4 start, 5 end, 6 bayStart, 7 bayEnd (epoch ms),
---       8 hold TTL ms, 9 ledger TTL ms, 10 payload JSON, 11.. bayId, technicianId pairs (ranked)
+--       8 hold TTL ms, 9 ledger TTL ms, 10 payload JSON,
+--       11 n = number of ignored reservation ids, then n ids (confirmed R members of an
+--       appointment the caller is moving: not busy), then bayId, technicianId pairs (ranked)
 -- Returns {holdId, bayId, technicianId, expiresMs, previousHoldId}; holdId is '' when no pair
 -- was free. The caller's previous hold of the day is always released first.
 local tag = ARGV[1]
 local t = redis.call('TIME')
 local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 local ledgerTtl = tonumber(ARGV[9])
+local ignoredCount = tonumber(ARGV[11])
+local ignored = {}
+for i = 12, 11 + ignoredCount do
+  ignored[ARGV[i]] = true
+end
 
 local function ledger(id)
   return 'ledger:' .. tag .. ':' .. id
@@ -34,7 +41,7 @@ local function busy(key, s, e)
     local f = fields(member)
     if f[1] == 'H' and tonumber(f[5]) <= now then
       redis.call('ZREM', key, member)
-    elseif tonumber(f[4]) > s then
+    elseif tonumber(f[4]) > s and not (f[1] == 'R' and ignored[f[2]]) then
       hit = true
     end
   end
@@ -57,7 +64,7 @@ end
 local start, finish = tonumber(ARGV[4]), tonumber(ARGV[5])
 local bayStart, bayEnd = tonumber(ARGV[6]), tonumber(ARGV[7])
 local expires = now + tonumber(ARGV[8])
-for i = 11, #ARGV - 1, 2 do
+for i = 12 + ignoredCount, #ARGV - 1, 2 do
   local bay, technician = ARGV[i], ARGV[i + 1]
   if not busy(ledger(technician), start, finish) and not busy(ledger(bay), bayStart, bayEnd) then
     local holdId = ARGV[3]

@@ -20,6 +20,12 @@ import org.springframework.transaction.annotation.Transactional;
  * writers of the same resource on a transaction-scoped advisory lock first means the exclusion
  * check only ever sees committed rows, so a race ends in a clean 23P01 or success. The lock only
  * orders writers; EXCLUDE remains the guarantee. Locks are released at commit or rollback.
+ *
+ * <p>Take advisory locks (old + new resources) before any UPDATE of an existing appointment row: a
+ * writer that updates the appointment first and then waits for a lock can deadlock with one that
+ * holds the lock and waits for the appointment row. Decide on state read <em>after</em> locking, or
+ * guard the UPDATE by the version read and retry when it changed (see {@code
+ * CustomerCancelService}).
  */
 @Component
 public class ResourceLocks {
