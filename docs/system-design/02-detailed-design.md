@@ -581,7 +581,7 @@ can read and write them atomically:
 | `ledger-gen:{…}` | integer | generation counter bumped by every write-through; a rebuild records it before reading the primary and refuses to install its snapshot if it changed — a rebuild can never overwrite newer data. After 3 overtaken attempts the ledger is treated as unavailable for that call (availability from the database, holds `503`) |
 
 **`POST /me/holds`**
-1. Validate with the caller's policy (§6.3 rules 1–4). No DB write. To keep a refused hold free of database work, the booking-window check here uses Redis `TIME`, and vehicle ownership is read from the replica (primary only on a miss); the confirm transaction re-checks both against the primary and DB `now()`, so correctness never depends on these early checks.
+1. Validate with the caller's policy (§6.3 rules 1–4). No DB write. To keep a refused hold free of database work, the booking-window check here uses Redis `TIME`, and vehicle ownership is read from the replica (primary only on a miss); the confirm transaction re-checks both against the primary and DB `now()`, so correctness never depends on these early checks. A hold with `rescheduleOf` additionally reads that appointment and its reservation ids (ownership + status) before the Redis call — the only database read on the hold path.
 2. Ensure the ledger is loaded.
 3. Lua `acquire_hold`: take time from Redis `TIME` (one clock); drop expired `H` members of
    the touched sets; release the caller's previous hold; ignore the `R` members of the appointment named in `rescheduleOf` (so a booking can move to an overlapping later time); walk the ranked technician × bay
