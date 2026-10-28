@@ -4,11 +4,13 @@ import com.keyloop.scheduler.common.db.SqlStates;
 import com.keyloop.scheduler.common.id.Ids;
 import com.keyloop.scheduler.common.time.TimeRange;
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -121,6 +123,130 @@ public class ReservationRepository {
         "SELECT id FROM resource_reservation WHERE appointment_id = ? AND active",
         UUID.class,
         appointmentId);
+  }
+
+  /** The appointment's active reservations, bay first. */
+  public List<ActiveReservation> activeRows(UUID appointmentId) {
+    return jdbc.query(
+        """
+        SELECT id, service_bay_id, technician_id, start_at, end_at FROM resource_reservation
+        WHERE appointment_id = ? AND active
+        ORDER BY service_bay_id NULLS LAST
+        """,
+        (rs, n) -> {
+          UUID bay = rs.getObject("service_bay_id", UUID.class);
+          return new ActiveReservation(
+              rs.getObject("id", UUID.class),
+              new ReservationRow(
+                  bay != null ? bay : rs.getObject("technician_id", UUID.class),
+                  bay != null ? ReservationRow.BAY : ReservationRow.TECHNICIAN,
+                  new TimeRange(
+                      rs.getTimestamp("start_at").toInstant(),
+                      rs.getTimestamp("end_at").toInstant())));
+        },
+        appointmentId);
+  }
+
+  /**
+   * Ends the appointment's active reservations of one type at {@code now() + extra} (database
+   * clock) where that is earlier than their end; a reservation that would be left empty (it starts
+   * at or after that instant) is deactivated instead. Only shrinks, so it can never conflict.
+   */
+  public List<TruncatedReservation> truncate(
+      UUID appointmentId, String resourceType, Duration extra) {
+    String column = ReservationRow.BAY.equals(resourceType) ? "service_bay_id" : "technician_id";
+    String cut = "now() + ?::bigint * interval '1 second'";
+    long seconds = extra.toSeconds();
+    return jdbc.query(
+        "UPDATE resource_reservation SET active = start_at < "
+            + cut
+            + ", end_at = CASE WHEN start_at < "
+            + cut
+            + " THEN "
+            + cut
+            + " ELSE end_at END WHERE appointment_id = ? AND active AND "
+            + column
+            + " IS NOT NULL AND end_at > "
+            + cut
+            + " RETURNING id, resource_id, start_at, end_at, active",
+        (rs, n) ->
+            new TruncatedReservation(
+                rs.getObject("id", UUID.class),
+                rs.getObject("resource_id", UUID.class),
+                resourceType,
+                rs.getBoolean("active")
+                    ? new TimeRange(
+                        rs.getTimestamp("start_at").toInstant(),
+                        rs.getTimestamp("end_at").toInstant())
+                    : null),
+        seconds,
+        seconds,
+        seconds,
+        appointmentId,
+        seconds);
+  }
+
+  /**
+   * Inserts an active BLOCK reservation. Takes the resource's advisory lock (callers lock it
+   * first); a refused row (23P01) raises {@link ReservationConflictException}.
+   */
+  public void insertBlock(UUID id, UUID dealershipId, ReservationRow row, String reason) {
+    locks.lockAll(List.of(row.resourceId()));
+    String column =
+        ReservationRow.BAY.equals(row.resourceType()) ? "service_bay_id" : "technician_id";
+    try {
+      jdbc.update(
+          "INSERT INTO resource_reservation (id, dealership_id, "
+              + column
+              + ", kind, start_at, end_at, reason) VALUES (?, ?, ?, 'BLOCK', ?, ?, ?)",
+          id,
+          dealershipId,
+          row.resourceId(),
+          Timestamp.from(row.period().start()),
+          Timestamp.from(row.period().end()),
+          reason);
+    } catch (DataAccessException e) {
+      if (SqlStates.has(e, SqlStates.EXCLUSION_VIOLATION)) {
+        throw new ReservationConflictException(row.resourceId());
+      }
+      throw e;
+    }
+  }
+
+  /** The dealership's active block with this id. */
+  public Optional<BlockRecord> findActiveBlock(UUID dealershipId, UUID id) {
+    return jdbc
+        .query(
+            """
+            SELECT id, service_bay_id, technician_id, start_at, end_at, reason
+            FROM resource_reservation
+            WHERE id = ? AND dealership_id = ? AND kind = 'BLOCK' AND active
+            """,
+            (rs, n) -> {
+              UUID bay = rs.getObject("service_bay_id", UUID.class);
+              return new BlockRecord(
+                  rs.getObject("id", UUID.class),
+                  new ReservationRow(
+                      bay != null ? bay : rs.getObject("technician_id", UUID.class),
+                      bay != null ? ReservationRow.BAY : ReservationRow.TECHNICIAN,
+                      new TimeRange(
+                          rs.getTimestamp("start_at").toInstant(),
+                          rs.getTimestamp("end_at").toInstant())),
+                  rs.getString("reason"));
+            },
+            id,
+            dealershipId)
+        .stream()
+        .findFirst();
+  }
+
+  /** Deactivates the block; false if it was not active any more. */
+  public boolean deactivateBlock(UUID id) {
+    return jdbc.update(
+            "UPDATE resource_reservation SET active = false"
+                + " WHERE id = ? AND kind = 'BLOCK' AND active",
+            id)
+        == 1;
   }
 
   /** Deactivates the appointment's active reservations; returns their ids. */

@@ -37,9 +37,11 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -80,6 +82,7 @@ public class BookingService {
   private final BookingListener listener;
   private final ObjectMapper json;
   private final SlotLedger ledger;
+  private final HoldGuard holds;
 
   /**
    * Creates the service; {@code transactions} runs each attempt in a new transaction, {@code
@@ -114,6 +117,7 @@ public class BookingService {
     this.listener = listener;
     this.json = json;
     this.ledger = ledger;
+    this.holds = new HoldGuard(ledger);
   }
 
   /**
@@ -162,6 +166,9 @@ public class BookingService {
       Occupancy occupied = occupancy.load(req.dealershipId(), rankingWindow(catalog, plan));
       candidates =
           new ArrayList<>(allocation.rank(catalog, plan, occupied, pinnedBay, pinnedTechnician));
+      if (channel == BookingChannel.DISPATCHER && !req.overrideHold()) {
+        candidates = withoutHeld(catalog.dealership(), candidates, plan);
+      }
     }
     Attempt attempt =
         new Attempt(
@@ -178,6 +185,9 @@ public class BookingService {
     boolean deadlockRetried = false;
     while (failures < MAX_ATTEMPTS && !candidates.isEmpty()) {
       ResourcePair pair = candidates.get(0);
+      if (channel == BookingChannel.DISPATCHER && req.overrideHold()) {
+        holds.clear(catalog.dealership(), targets(List.of(pair), plan), true);
+      }
       Persisted persisted;
       try {
         persisted = transactions.execute(status -> persist(attempt, pair));
@@ -264,6 +274,42 @@ public class BookingService {
     return SlotMessages.at(start.atZone(catalog.dealership().zoneId()).toLocalDateTime())
         + " with "
         + String.join(", ", names);
+  }
+
+  /**
+   * Dispatcher bookings respect customers' live holds (spec 8.6): pairs touching a held resource
+   * are dropped; when every candidate is held the booking is refused with 409 SLOT_HELD.
+   */
+  private List<ResourcePair> withoutHeld(
+      DealershipView d, List<ResourcePair> candidates, JobPlan plan) {
+    if (candidates.isEmpty()) {
+      return candidates;
+    }
+    List<HoldGuard.Held> held = holds.find(d, targets(candidates, plan));
+    if (held.isEmpty()) {
+      return candidates;
+    }
+    Set<UUID> taken = new HashSet<>();
+    held.forEach(h -> taken.addAll(h.resources()));
+    List<ResourcePair> free =
+        new ArrayList<>(
+            candidates.stream()
+                .filter(p -> !taken.contains(p.bayId()) && !taken.contains(p.technicianId()))
+                .toList());
+    if (free.isEmpty()) {
+      throw holds.refusal(d, held);
+    }
+    return free;
+  }
+
+  /** The periods the pairs' technicians and bays would be occupied. */
+  private static Map<UUID, TimeRange> targets(List<ResourcePair> pairs, JobPlan plan) {
+    Map<UUID, TimeRange> targets = new LinkedHashMap<>();
+    for (ResourcePair p : pairs) {
+      targets.put(p.technicianId(), plan.period());
+      targets.put(p.bayId(), plan.bayPeriod());
+    }
+    return targets;
   }
 
   /** A refused write means the ledger let a taken slot through: rebuild it before its next use. */

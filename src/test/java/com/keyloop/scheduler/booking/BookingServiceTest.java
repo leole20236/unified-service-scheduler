@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -25,6 +26,7 @@ import com.keyloop.scheduler.common.api.ApiException;
 import com.keyloop.scheduler.common.api.NotFoundException;
 import com.keyloop.scheduler.common.api.ProblemCodes;
 import com.keyloop.scheduler.common.api.RequestInProgressException;
+import com.keyloop.scheduler.common.api.SlotHeldException;
 import com.keyloop.scheduler.common.api.SlotUnavailableException;
 import com.keyloop.scheduler.common.api.ValidationException;
 import com.keyloop.scheduler.common.security.CallerContext;
@@ -34,6 +36,7 @@ import com.keyloop.scheduler.common.time.TimeRange;
 import com.keyloop.scheduler.customer.CustomerService;
 import com.keyloop.scheduler.customer.VehicleView;
 import com.keyloop.scheduler.hold.SlotLedger;
+import com.keyloop.scheduler.hold.SlotLedger.StoredHold;
 import com.keyloop.scheduler.outbox.OutboxWriter;
 import com.keyloop.scheduler.query.AppointmentView;
 import com.keyloop.scheduler.support.CatalogFixtures;
@@ -621,5 +624,87 @@ class BookingServiceTest {
             Fixtures.RIVERSIDE,
             new TimeRange(
                 Instant.parse("2026-11-02T00:00:00Z"), Instant.parse("2026-11-03T00:00:00Z")));
+  }
+
+  private static StoredHold liveHold(UUID holdId, UUID holder, ResourcePair pair) {
+    TimeRange period =
+        new TimeRange(MONDAY_9.toInstant(), MONDAY_9.toInstant().plusSeconds(45 * 60));
+    return new StoredHold(
+        holdId, holder, pair, period, period, "{}", Instant.parse("2026-11-01T10:07:00Z"));
+  }
+
+  @Test
+  void dispatcherBookingSkipsPairsCustomersAreHolding() {
+    UUID holdId = UUID.randomUUID();
+    when(ledger.heldBy(eq(Fixtures.RIVERSIDE), any(), anyMap()))
+        .thenReturn(Map.of(Fixtures.SAM, List.of(holdId)));
+    when(ledger.getHold(eq(Fixtures.RIVERSIDE), any(), eq(holdId)))
+        .thenReturn(
+            Optional.of(
+                liveHold(
+                    holdId,
+                    UUID.randomUUID(),
+                    new ResourcePair(Fixtures.RIVERSIDE_BAY_1, Fixtures.SAM))));
+    when(reservations.insertAll(any(), any(), any())).thenReturn(inserted());
+
+    BookingResult result =
+        service().book(dispatcher, BookingChannel.DISPATCHER, dispatcherRequest(null, null), KEY);
+
+    assertThat(result.body().technician().id()).isEqualTo(Fixtures.TOM);
+    verify(ledger, never()).release(any(), any(), any(), any());
+  }
+
+  @Test
+  void dispatcherBookingOfHeldTimeIsSlotHeldUnlessOverridden() {
+    UUID holdId = UUID.randomUUID();
+    UUID holder = UUID.randomUUID();
+    when(allocation.rank(any(), any(), any(), any(), any()))
+        .thenReturn(List.of(new ResourcePair(Fixtures.RIVERSIDE_BAY_1, Fixtures.SAM)));
+    when(ledger.heldBy(eq(Fixtures.RIVERSIDE), any(), anyMap()))
+        .thenReturn(Map.of(Fixtures.RIVERSIDE_BAY_1, List.of(holdId)));
+    when(ledger.getHold(eq(Fixtures.RIVERSIDE), any(), eq(holdId)))
+        .thenReturn(
+            Optional.of(
+                liveHold(
+                    holdId, holder, new ResourcePair(Fixtures.RIVERSIDE_BAY_1, Fixtures.TOM))));
+    when(reservations.insertAll(any(), any(), any())).thenReturn(inserted());
+
+    assertThatThrownBy(
+            () ->
+                service()
+                    .book(
+                        dispatcher,
+                        BookingChannel.DISPATCHER,
+                        dispatcherRequest(Fixtures.RIVERSIDE_BAY_1, Fixtures.SAM),
+                        KEY))
+        .isInstanceOf(SlotHeldException.class)
+        .hasMessageContaining("until 10:07 (Europe/London)");
+    verify(appointments, never()).insert(any());
+
+    BookingRequest override =
+        new BookingRequest(
+            Fixtures.RIVERSIDE,
+            Fixtures.ALICE,
+            Fixtures.ALICE_FOCUS,
+            List.of(Fixtures.OIL_CHANGE),
+            MONDAY_9,
+            null,
+            Fixtures.RIVERSIDE_BAY_1,
+            Fixtures.SAM,
+            null,
+            true);
+    service().book(dispatcher, BookingChannel.DISPATCHER, override, KEY);
+
+    verify(ledger).release(eq(Fixtures.RIVERSIDE), any(), eq(holdId), eq(holder));
+    verify(appointments).insert(any());
+  }
+
+  @Test
+  void customerBookingsDoNotLookAtOtherCustomersHolds() {
+    when(reservations.insertAll(any(), any(), any())).thenReturn(inserted());
+
+    service().book(customer, BookingChannel.CUSTOMER, request(MONDAY_9), KEY);
+
+    verify(ledger, never()).heldBy(any(), any(), anyMap());
   }
 }

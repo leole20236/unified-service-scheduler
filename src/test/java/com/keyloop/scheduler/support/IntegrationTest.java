@@ -9,6 +9,7 @@ import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisURI;
 import io.lettuce.core.api.StatefulRedisConnection;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
@@ -77,6 +78,22 @@ public abstract class IntegrationTest {
     }
     registry.add("spring.data.redis.host", REDIS::getHost);
     registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
+  }
+
+  /**
+   * The database and Redis settings of the shared containers as {@code key=value} properties, for
+   * tests that start a second application instance against the same infrastructure.
+   */
+  protected static String[] sharedInfrastructureProperties() {
+    List<String> properties = new ArrayList<>();
+    for (String role : List.of("primary", "replica")) {
+      properties.add("app.datasource." + role + ".url=" + POSTGRES.getJdbcUrl());
+      properties.add("app.datasource." + role + ".username=" + POSTGRES.getUsername());
+      properties.add("app.datasource." + role + ".password=" + POSTGRES.getPassword());
+    }
+    properties.add("spring.data.redis.host=" + REDIS.getHost());
+    properties.add("spring.data.redis.port=" + REDIS.getMappedPort(6379));
+    return properties.toArray(String[]::new);
   }
 
   private void deleteExcept(String table, List<UUID> keep) {

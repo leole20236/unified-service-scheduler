@@ -420,6 +420,29 @@ public class SlotLedger {
         .toList();
   }
 
+  /**
+   * Ids of live holds overlapping each resource's range, in one consistent read of the day; only
+   * resources with at least one such hold are present.
+   */
+  public Map<UUID, List<UUID>> heldBy(
+      UUID dealershipId, LocalDate date, Map<UUID, TimeRange> ranges) {
+    Map<UUID, List<UUID>> held = new HashMap<>();
+    readIntervals(dealershipId, date, ranges.keySet(), null)
+        .forEach(
+            (resource, intervals) -> {
+              TimeRange r = ranges.get(resource);
+              List<UUID> ids =
+                  intervals.stream()
+                      .filter(i -> i.held() && i.range().overlaps(r))
+                      .map(Interval::id)
+                      .toList();
+              if (!ids.isEmpty()) {
+                held.put(resource, ids);
+              }
+            });
+    return held;
+  }
+
   /** One live interval read from a ledger set. */
   private record Interval(UUID id, boolean held, TimeRange range) {}
 

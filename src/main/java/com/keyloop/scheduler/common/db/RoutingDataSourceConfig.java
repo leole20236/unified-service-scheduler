@@ -4,6 +4,7 @@ import com.zaxxer.hikari.HikariDataSource;
 import java.util.Map;
 import javax.sql.DataSource;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.flyway.FlywayDataSource;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceProperties;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -45,19 +46,21 @@ public class RoutingDataSourceConfig {
     return new DataSourceProperties();
   }
 
-  /** Primary pool; also the only pool Flyway migrates. */
+  /** Primary pool ({@code app.pool.primary-size}, default 20); the only pool Flyway migrates. */
   @Bean(destroyMethod = "close")
   @FlywayDataSource
   public HikariDataSource primaryDataSource(
-      @Qualifier("primaryProperties") DataSourceProperties properties) {
-    return pool(properties, "primary", PRIMARY_POOL_SIZE);
+      @Qualifier("primaryProperties") DataSourceProperties properties,
+      @Value("${app.pool.primary-size:" + PRIMARY_POOL_SIZE + "}") int size) {
+    return pool(properties, "primary", size);
   }
 
-  /** Replica pool for read-only transactions. */
+  /** Replica pool for read-only transactions ({@code app.pool.replica-size}, default 30). */
   @Bean(destroyMethod = "close")
   public HikariDataSource replicaDataSource(
-      @Qualifier("replicaProperties") DataSourceProperties properties) {
-    return pool(properties, "replica", REPLICA_POOL_SIZE);
+      @Qualifier("replicaProperties") DataSourceProperties properties,
+      @Value("${app.pool.replica-size:" + REPLICA_POOL_SIZE + "}") int size) {
+    return pool(properties, "replica", size);
   }
 
   /** Routing data source used by the application, connecting lazily. */

@@ -63,6 +63,11 @@ public final class DispatcherBookingPolicy implements BookingPolicy {
       }
       return;
     }
+    if (newPlan.period().start().equals(currentPeriod.start())) {
+      // Rules about the start only apply to a new start: a job whose start has passed can still
+      // change bay, technician or length.
+      return;
+    }
     checkNew(newPlan, d, now);
   }
 

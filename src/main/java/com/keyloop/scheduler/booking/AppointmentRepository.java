@@ -141,6 +141,116 @@ public class AppointmentRepository {
             expectedVersion));
   }
 
+  /** Planned minutes (sum of the booked services' snapshot durations) and minutes worked. */
+  public Optional<AppointmentProgress> progress(UUID id) {
+    return jdbc
+        .query(
+            """
+            SELECT a.worked_minutes,
+                   (SELECT coalesce(sum(s.duration_minutes), 0) FROM appointment_service s
+                    WHERE s.appointment_id = a.id) AS planned_minutes
+            FROM appointment a WHERE a.id = ?
+            """,
+            (rs, row) ->
+                new AppointmentProgress(rs.getInt("planned_minutes"), rs.getInt("worked_minutes")),
+            id)
+        .stream()
+        .findFirst();
+  }
+
+  /** Minutes of the current stint, by the database clock (0 when no stint is running). */
+  private static final String STINT =
+      "coalesce(greatest(0, floor(extract(epoch FROM now() - started_at) / 60)), 0)::int";
+
+  /**
+   * One conditional status UPDATE (spec 8.4): only from an allowed status, at the given version,
+   * inside the dealership, and for NO_SHOW only 30 minutes after the start by the database clock.
+   * Returns the new version and period, or empty if no row qualified.
+   */
+  public Optional<Transitioned> transition(
+      UUID id, UUID dealershipId, long version, StatusChange change) {
+    StringBuilder sql =
+        new StringBuilder("UPDATE appointment SET status = ?, version = version + 1,")
+            .append(" updated_at = now()");
+    final List<Object> args = new ArrayList<>(List.of(change.to().name()));
+    if (change.startNow()) {
+      sql.append(", started_at = now()");
+    }
+    if (change.addStint()) {
+      sql.append(", worked_minutes = worked_minutes + ").append(STINT);
+    }
+    if (change.endNowIfEarlier()) {
+      sql.append(", end_at = CASE WHEN now() > start_at AND now() < end_at THEN now()")
+          .append(" ELSE end_at END");
+    }
+    if (change.holdReason() != null) {
+      sql.append(", hold_reason = ?, started_at = NULL");
+      args.add(change.holdReason().name());
+    }
+    StatusChange.Resume resume = change.resume();
+    if (resume != null) {
+      sql.append(", hold_reason = NULL, started_at = ?, service_bay_id = ?, technician_id = ?,")
+          .append(" start_at = least(start_at, ?), end_at = ?");
+      args.add(Timestamp.from(resume.period().start()));
+      args.add(resume.serviceBayId());
+      args.add(resume.technicianId());
+      args.add(Timestamp.from(resume.period().start()));
+      args.add(Timestamp.from(resume.period().end()));
+    }
+    sql.append(" WHERE id = ? AND dealership_id = ? AND version = ?")
+        .append(" AND status = ANY (?::text[])");
+    args.addAll(List.of(id, dealershipId, version));
+    args.add(change.from().stream().map(Enum::name).toArray(String[]::new));
+    if (change.requireNoShowGrace()) {
+      sql.append(" AND now() >= start_at + interval '30 minutes'");
+    }
+    sql.append(" RETURNING version, start_at, end_at");
+    return jdbc
+        .query(
+            sql.toString(),
+            (rs, row) ->
+                new Transitioned(
+                    rs.getLong("version"),
+                    new TimeRange(
+                        rs.getTimestamp("start_at").toInstant(),
+                        rs.getTimestamp("end_at").toInstant())),
+            args.toArray())
+        .stream()
+        .findFirst();
+  }
+
+  /**
+   * A dispatcher move or resize (spec 8.4): new resources and period, only at the expected version,
+   * inside the dealership and while the job is BOOKED, CHECKED_IN or IN_PROGRESS. Returns the new
+   * version, or empty if no row qualified.
+   */
+  public OptionalLong markMoved(
+      UUID id,
+      UUID dealershipId,
+      long expectedVersion,
+      UUID serviceBayId,
+      UUID technicianId,
+      TimeRange period) {
+    return single(
+        jdbc.queryForList(
+            """
+            UPDATE appointment
+            SET service_bay_id = ?, technician_id = ?, start_at = ?, end_at = ?,
+                version = version + 1, updated_at = now()
+            WHERE id = ? AND dealership_id = ? AND version = ?
+              AND status IN ('BOOKED', 'CHECKED_IN', 'IN_PROGRESS')
+            RETURNING version
+            """,
+            Long.class,
+            serviceBayId,
+            technicianId,
+            Timestamp.from(period.start()),
+            Timestamp.from(period.end()),
+            id,
+            dealershipId,
+            expectedVersion));
+  }
+
   private static OptionalLong single(List<Long> versions) {
     return versions.isEmpty() ? OptionalLong.empty() : OptionalLong.of(versions.get(0));
   }

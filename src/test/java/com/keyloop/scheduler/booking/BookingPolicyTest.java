@@ -315,6 +315,20 @@ class BookingPolicyTest {
   }
 
   @Test
+  void dispatcherChangeKeepingPassedStartSkipsTheStartRules() {
+    // started an hour ago (outside the 15 minute walk-in grace), only the length changes
+    assertThatCode(
+            () ->
+                DISPATCHER.checkChange(
+                    AppointmentStatus.CHECKED_IN,
+                    range("2026-11-01T09:00:00Z", 45),
+                    twoHours("2026-11-01T09:00:00Z"),
+                    RIVERSIDE,
+                    NOW))
+        .doesNotThrowAnyException();
+  }
+
+  @Test
   void checkedInMoveValidatesNewPlan() {
     assertThatCode(
             () ->
