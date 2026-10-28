@@ -303,4 +303,101 @@ class CustomerCancelServiceTest {
             eq(Map.of()));
     verify(ledger, never()).applyCommitted(any(), eq(LocalDate.of(2026, 11, 4)), any(), any());
   }
+
+  @Test
+  void versionMissRestartsWithOneLockAllPerAttemptAndAbandonsTheFirstTransaction() {
+    AppointmentState moved =
+        new AppointmentState(
+            APPOINTMENT,
+            Fixtures.ALICE,
+            Fixtures.RIVERSIDE,
+            AppointmentStatus.BOOKED,
+            4,
+            WEDNESDAY_9,
+            Fixtures.RIVERSIDE_BAY_2,
+            Fixtures.TOM);
+    when(appointments.findState(APPOINTMENT))
+        .thenReturn(
+            Optional.of(state(Fixtures.ALICE, AppointmentStatus.BOOKED, 3, WEDNESDAY_9)),
+            Optional.of(moved));
+    when(appointments.markCancelled(APPOINTMENT, Fixtures.ALICE, OptionalLong.of(3)))
+        .thenReturn(OptionalLong.empty());
+    when(appointments.markCancelled(APPOINTMENT, Fixtures.ALICE, OptionalLong.of(4)))
+        .thenReturn(OptionalLong.of(5));
+    List<String> events = new ArrayList<>();
+    org.mockito.Mockito.doAnswer(
+            inv -> {
+              events.add("lock" + ((java.util.Collection<?>) inv.getArgument(0)).size());
+              return null;
+            })
+        .when(locks)
+        .lockAll(any());
+    TransactionOperations rollingBack =
+        new TransactionOperations() {
+          @Override
+          public <T> T execute(TransactionCallback<T> action) {
+            try {
+              T result = action.doInTransaction(null);
+              events.add("commit");
+              return result;
+            } catch (RuntimeException e) {
+              events.add("rollback");
+              throw e;
+            }
+          }
+        };
+
+    new CustomerCancelService(
+            customers,
+            catalogs,
+            appointments,
+            reservations,
+            locks,
+            reads,
+            outbox,
+            ledger,
+            clock,
+            rollingBack)
+        .cancel(alice, APPOINTMENT);
+
+    assertThat(events).containsExactly("lock2", "rollback", "lock2", "commit");
+  }
+
+  @Test
+  void attemptsAreCappedThenTheDiagnosisIsReturned() {
+    long[] version = {3};
+    when(appointments.findState(APPOINTMENT))
+        .thenAnswer(
+            inv ->
+                Optional.of(
+                    state(Fixtures.ALICE, AppointmentStatus.BOOKED, version[0]++, WEDNESDAY_9)));
+    when(appointments.markCancelled(any(), any(), any())).thenReturn(OptionalLong.empty());
+
+    assertThatThrownBy(() -> service().cancel(alice, APPOINTMENT))
+        .isInstanceOf(VersionConflictException.class);
+
+    verify(locks, org.mockito.Mockito.times(CustomerCancelService.MAX_ATTEMPTS)).lockAll(any());
+    verify(outbox, never())
+        .append(any(), any(), any(), any(), org.mockito.ArgumentMatchers.anyLong(), any());
+  }
+
+  @Test
+  void deadlockIsRetriedOnceFromTheTop() {
+    when(appointments.markCancelled(APPOINTMENT, Fixtures.ALICE, OptionalLong.of(3)))
+        .thenThrow(new RuntimeException(new java.sql.SQLException("deadlock", "40P01")))
+        .thenReturn(OptionalLong.of(4));
+
+    assertThat(service().cancel(alice, APPOINTMENT)).isSameAs(cancelledView);
+    verify(locks, org.mockito.Mockito.times(2)).lockAll(any());
+  }
+
+  @Test
+  void secondDeadlockPropagates() {
+    when(appointments.markCancelled(any(), any(), any()))
+        .thenThrow(new RuntimeException(new java.sql.SQLException("deadlock", "40P01")));
+
+    assertThatThrownBy(() -> service().cancel(alice, APPOINTMENT))
+        .isInstanceOf(RuntimeException.class);
+    verify(locks, org.mockito.Mockito.times(2)).lockAll(any());
+  }
 }

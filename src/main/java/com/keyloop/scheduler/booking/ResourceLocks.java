@@ -21,10 +21,12 @@ import org.springframework.transaction.annotation.Transactional;
  * check only ever sees committed rows, so a race ends in a clean 23P01 or success. The lock only
  * orders writers; EXCLUDE remains the guarantee. Locks are released at commit or rollback.
  *
- * <p>Take advisory locks (old + new resources) before any UPDATE of an existing appointment row: a
+ * <p>One {@code lockAll} per transaction, before any UPDATE of an existing appointment row: a
  * writer that updates the appointment first and then waits for a lock can deadlock with one that
- * holds the lock and waits for the appointment row. Decide on state read <em>after</em> locking, or
- * guard the UPDATE by the version read and retry when it changed (see {@code
+ * holds the lock and waits for the appointment row, and a second {@code lockAll} later in the same
+ * transaction would take keys out of the global ascending order while earlier ones are still held.
+ * Lock old and new resources together; if more resources turn out to be needed (the appointment
+ * moved while the transaction queued), roll back and restart the whole attempt (see {@code
  * CustomerCancelService}).
  */
 @Component
