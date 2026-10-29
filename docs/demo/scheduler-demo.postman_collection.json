@@ -1,0 +1,257 @@
+{
+  "info": {
+    "name": "Unified Service Scheduler — Demo",
+    "description": "Run `./scripts/demo.sh up` first, then send the requests in order (or Run collection). Solo dealership = 1 bay + 1 technician, so any overlap is a real conflict. Step 8 (bypass the app) runs in the terminal: `./scripts/demo.sh sql 11:00`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Two days ahead (UTC date): inside the customer lead time and the change window.",
+          "pm.collectionVariables.set('day', new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10));"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080/api/v1" },
+    { "key": "solo", "value": "00000000-0000-0000-d000-000000000003" },
+    { "key": "oilChange", "value": "00000000-0000-0000-5000-000000000001" },
+    { "key": "alice", "value": "00000000-0000-0000-5b00-00000000a11c" },
+    { "key": "aliceCar", "value": "00000000-0000-0000-e000-00000000a11c" },
+    { "key": "bob", "value": "00000000-0000-0000-5b00-0000000000b0" },
+    { "key": "bobCar", "value": "00000000-0000-0000-e000-0000000000b0" },
+    { "key": "dispatcher", "value": "00000000-0000-0000-5b00-00000000d15b" },
+    { "key": "day", "value": "" },
+    { "key": "holdId", "value": "" },
+    { "key": "idempotencyKey", "value": "" },
+    { "key": "appointmentId", "value": "" },
+    { "key": "etag", "value": "" },
+    { "key": "staleEtag", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. Alice — free times (oil change)",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "X-User-Id", "value": "{{alice}}" },
+          { "key": "X-User-Roles", "value": "CUSTOMER" }
+        ],
+        "url": "{{baseUrl}}/dealerships/{{solo}}/availability?serviceTypeIds={{oilChange}}&from={{day}}&to={{day}}",
+        "description": "Free 45-minute start times, from Redis and the read replica."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 with free start times', () => {",
+              "  pm.response.to.have.status(200);",
+              "  pm.expect(pm.response.json().days[0].starts).to.include(pm.collectionVariables.get('day') + 'T09:00:00Z');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Alice — hold 09:00 (201)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "X-User-Id", "value": "{{alice}}" },
+          { "key": "X-User-Roles", "value": "CUSTOMER" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"dealershipId\": \"{{solo}}\",\n  \"vehicleId\": \"{{aliceCar}}\",\n  \"serviceTypeIds\": [\"{{oilChange}}\"],\n  \"start\": \"{{day}}T09:00:00Z\"\n}"
+        },
+        "url": "{{baseUrl}}/me/holds",
+        "description": "Atomic Lua script holds the bay AND the technician for 10 minutes."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 hold created', () => pm.response.to.have.status(201));",
+              "pm.collectionVariables.set('holdId', pm.response.json().id);",
+              "pm.collectionVariables.set('idempotencyKey', pm.variables.replaceIn('{{$guid}}'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Bob — hold 09:15, overlaps (409)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "X-User-Id", "value": "{{bob}}" },
+          { "key": "X-User-Roles", "value": "CUSTOMER" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"dealershipId\": \"{{solo}}\",\n  \"vehicleId\": \"{{bobCar}}\",\n  \"serviceTypeIds\": [\"{{oilChange}}\"],\n  \"start\": \"{{day}}T09:15:00Z\"\n}"
+        },
+        "url": "{{baseUrl}}/me/holds",
+        "description": "Rejected in Redis without a database call; the body suggests the nearest free times."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('409 SLOT_UNAVAILABLE with alternatives', () => {",
+              "  pm.response.to.have.status(409);",
+              "  pm.expect(pm.response.json().code).to.eql('SLOT_UNAVAILABLE');",
+              "  pm.expect(pm.response.json().alternatives).to.not.be.empty;",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Alice — confirm booking (201)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "X-User-Id", "value": "{{alice}}" },
+          { "key": "X-User-Roles", "value": "CUSTOMER" },
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "{{idempotencyKey}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"holdId\": \"{{holdId}}\",\n  \"dealershipId\": \"{{solo}}\",\n  \"vehicleId\": \"{{aliceCar}}\",\n  \"serviceTypeIds\": [\"{{oilChange}}\"],\n  \"start\": \"{{day}}T09:00:00Z\"\n}"
+        },
+        "url": "{{baseUrl}}/me/appointments",
+        "description": "One transaction: appointment + bay and technician reservations + outbox event. EXCLUDE is the final check."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 BOOKED with ETag', () => {",
+              "  pm.response.to.have.status(201);",
+              "  pm.expect(pm.response.json().status).to.eql('BOOKED');",
+              "  pm.response.to.have.header('ETag');",
+              "});",
+              "pm.collectionVariables.set('appointmentId', pm.response.json().id);",
+              "pm.collectionVariables.set('etag', pm.response.headers.get('ETag'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Alice — retry same request (replayed)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "X-User-Id", "value": "{{alice}}" },
+          { "key": "X-User-Roles", "value": "CUSTOMER" },
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "{{idempotencyKey}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"holdId\": \"{{holdId}}\",\n  \"dealershipId\": \"{{solo}}\",\n  \"vehicleId\": \"{{aliceCar}}\",\n  \"serviceTypeIds\": [\"{{oilChange}}\"],\n  \"start\": \"{{day}}T09:00:00Z\"\n}"
+        },
+        "url": "{{baseUrl}}/me/appointments",
+        "description": "Same Idempotency-Key: the same appointment comes back, no second booking."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('same appointment, Idempotency-Replayed: true', () => {",
+              "  pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('appointmentId'));",
+              "  pm.expect(pm.response.headers.get('Idempotency-Replayed')).to.eql('true');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Dispatcher — drag to 11:00 (200)",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "X-User-Id", "value": "{{dispatcher}}" },
+          { "key": "X-User-Roles", "value": "DISPATCHER" },
+          { "key": "X-Dealership-Ids", "value": "{{solo}}" },
+          { "key": "Content-Type", "value": "application/merge-patch+json" },
+          { "key": "If-Match", "value": "{{etag}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"{{day}}T11:00:00Z\"\n}"
+        },
+        "url": "{{baseUrl}}/dealerships/{{solo}}/appointments/{{appointmentId}}",
+        "description": "Optimistic locking: If-Match carries the version the dispatcher's board showed."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 moved, new ETag', () => pm.response.to.have.status(200));",
+              "pm.collectionVariables.set('staleEtag', pm.collectionVariables.get('etag'));",
+              "pm.collectionVariables.set('etag', pm.response.headers.get('ETag'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Second dispatcher — stale drag (412)",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "X-User-Id", "value": "{{dispatcher}}" },
+          { "key": "X-User-Roles", "value": "DISPATCHER" },
+          { "key": "X-Dealership-Ids", "value": "{{solo}}" },
+          { "key": "Content-Type", "value": "application/merge-patch+json" },
+          { "key": "If-Match", "value": "{{staleEtag}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"{{day}}T12:00:00Z\"\n}"
+        },
+        "url": "{{baseUrl}}/dealerships/{{solo}}/appointments/{{appointmentId}}",
+        "description": "Uses the ETag from before step 6: someone else already changed the card, so the UI snaps it back."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('412 VERSION_CONFLICT', () => {",
+              "  pm.response.to.have.status(412);",
+              "  pm.expect(pm.response.json().code).to.eql('VERSION_CONFLICT');",
+              "});"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+<section id="erd" data-transition="fade" style="background:#F6F5F1;color:#14213D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:16px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#B4521A;letter-spacing:2px">DATA MODEL</p>
+<h2 style="font-size:64px;font-weight:700;line-height:1.15">The database repeats the key rules</h2>
+<div style="position:absolute;left:128px;top:300px;width:280px;height:80px;display:flex;justify-content:center;align-items:center;background:#FFFFFF;border:2px solid #14213D;border-radius:12px"><p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;font-weight:600">CUSTOMER</p></div>
+<div style="position:absolute;left:560px;top:300px;width:400px;height:80px;display:flex;justify-content:center;align-items:center;background:#FFFFFF;border:2px solid #14213D;border-radius:12px"><p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;font-weight:600">DEALERSHIP</p></div>
+<div style="position:absolute;left:128px;top:470px;width:280px;height:80px;display:flex;justify-content:center;align-items:center;background:#FFFFFF;border:2px solid #14213D;border-radius:12px"><p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;font-weight:600">VEHICLE</p></div>
+<div style="position:absolute;left:520px;top:470px;width:220px;height:80px;display:flex;justify-content:center;align-items:center;background:#FFFFFF;border:2px solid #14213D;border-radius:12px"><p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;font-weight:600">SERVICE_BAY</p></div>
+<div style="position:absolute;left:790px;top:470px;width:230px;height:80px;display:flex;justify-content:center;align-items:center;background:#FFFFFF;border:2px solid #14213D;border-radius:12px"><p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;font-weight:600">TECHNICIAN</p></div>
+<div style="position:absolute;left:128px;top:660px;width:280px;height:120px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:4px;background:#FFFFFF;border:2px solid #14213D;border-radius:12px"><p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;font-weight:600">APPOINTMENT</p><p style="font-size:24px;color:#4A5568">status · version</p></div>
+<div style="position:absolute;left:520px;top:640px;width:500px;height:220px;display:flex;flex-direction:column;justify-content:center;gap:8px;background:#14213D;padding:24px 32px;border-radius:12px"><p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;font-weight:600;color:#F2A65A">RESOURCE_RESERVATION</p><p style="font-size:24px;color:#C9D3E6">bay XOR technician per row</p><p style="font-size:24px;color:#C9D3E6">period tstzrange (UTC)</p><p style="font-size:24px;color:#F6F5F1">EXCLUDE: no overlap</p></div>
+<x-connector x1="268" y1="380" x2="268" y2="470" head="end" style="color:#14213D;border-width:3px"></x-connector>
+<x-connector x1="268" y1="550" x2="268" y2="660" head="end" style="color:#14213D;border-width:3px"></x-connector>
+<x-connector x1="630" y1="380" x2="630" y2="470" head="end" style="color:#14213D;border-width:3px"></x-connector>
+<x-connector x1="905" y1="380" x2="905" y2="470" head="end" style="color:#14213D;border-width:3px"></x-connector>
+<x-connector x1="630" y1="550" x2="630" y2="640" head="end" style="color:#14213D;border-width:3px"></x-connector>
+<x-connector x1="905" y1="550" x2="905" y2="640" head="end" style="color:#14213D;border-width:3px"></x-connector>
+<x-connector x1="408" y1="720" x2="520" y2="720" head="end" style="color:#14213D;border-width:3px"></x-connector>
+<p style="position:absolute;left:418px;top:676px;width:92px;font-size:24px;text-align:center;color:#4A5568">1 : 2</p>
+<div style="position:absolute;left:1110px;top:300px;width:682px;display:flex;flex-direction:column;gap:24px">
+<h3 style="font-size:32px;font-weight:600">Enforced in SQL, not only in code</h3>
+<div style="display:flex;flex-direction:column;gap:6px;border-left:6px solid #B4521A;padding:4px 0 4px 24px"><p style="font-size:26px;font-weight:600">No overlapping bookings</p><p style="font-size:24px;color:#4A5568">EXCLUDE (resource_id =, period &amp;&amp;)</p></div>
+<div style="display:flex;flex-direction:column;gap:6px;border-left:6px solid #2B6CB0;padding:4px 0 4px 24px"><p style="font-size:26px;font-weight:600">No other dealership’s bay or technician</p><p style="font-size:24px;color:#4A5568">composite FK (bay | tech, dealership_id)</p></div>
+<div style="display:flex;flex-direction:column;gap:6px;border-left:6px solid #2B6CB0;padding:4px 0 4px 24px"><p style="font-size:26px;font-weight:600">No one else’s vehicle</p><p style="font-size:24px;color:#4A5568">composite FK (vehicle_id, customer_id)</p></div>
+<div style="display:flex;flex-direction:column;gap:6px;border-left:6px solid #2B6CB0;padding:4px 0 4px 24px"><p style="font-size:26px;font-weight:600">One clock</p><p style="font-size:24px;color:#4A5568">timestamptz in UTC; opening hours local + zone</p></div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6A7179">Simplified; skills, services and opening hours omitted · full ERD in docs/diagrams/03-erd.png · 8</p>
+<aside>(~15s) This is the data. Every booking saves two rows: one for the bay, one for the technician, each with a time range. The no-overlap rule lives here. The database also stops you from booking another dealer's bay or someone else's car.</aside>
+</section>

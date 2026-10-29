@@ -1,0 +1,30 @@
+<section id="proof" data-transition="fade" style="background:#F6F5F1;color:#14213D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<div style="display:flex;flex-direction:column;gap:16px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#B4521A;letter-spacing:2px">PROOF</p>
+<h2 style="font-size:64px;font-weight:700;line-height:1.15">Tests caught what the review missed</h2>
+</div>
+<div style="display:flex;align-items:center;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;padding:36px 40px;border:2px solid #B4521A;border-radius:16px">
+<p style="font-size:24px;font-weight:600;color:#B4521A;letter-spacing:2px">BEFORE</p>
+<p style="font-size:120px;font-weight:700;line-height:1.1;color:#B4521A">209</p>
+<p style="font-size:32px;font-weight:600">deadlocks (40P01)</p>
+<p style="font-size:26px;color:#4A5568">50 threads, one slot: 12 of 30 runs failed</p>
+</div>
+<x-connector head="end" style="width:80px;color:#14213D;border-width:4px"></x-connector>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;padding:36px 40px;border:2px solid #2B6CB0;border-radius:16px">
+<p style="font-size:24px;font-weight:600;color:#2B6CB0;letter-spacing:2px">AFTER</p>
+<p style="font-size:120px;font-weight:700;line-height:1.1;color:#2B6CB0">0</p>
+<p style="font-size:32px;font-weight:600">deadlocks</p>
+<p style="font-size:26px;color:#4A5568">sorted advisory locks: 30 of 30 runs green</p>
+</div>
+</div>
+<p style="font-size:28px;color:#4A5568;line-height:1.4"><b>Why:</b> the exclusion check inserts its index entry, then waits for the other in-flight one, so two overlapping inserts wait on each other.</p>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:6px;background:#E9E6DF;padding:24px 28px;border-radius:12px"><h3 style="font-size:28px;font-weight:600">SQL invariant</h3><p style="font-size:24px;color:#4A5568">checked after every race test</p></div>
+<div style="flex:1;display:flex;flex-direction:column;gap:6px;background:#E9E6DF;padding:24px 28px;border-radius:12px"><h3 style="font-size:28px;font-weight:600">Two app instances</h3><p style="font-size:24px;color:#4A5568">racing on one database</p></div>
+<div style="flex:1;display:flex;flex-direction:column;gap:6px;background:#E9E6DF;padding:24px 28px;border-radius:12px"><h3 style="font-size:28px;font-weight:600">Real infrastructure</h3><p style="font-size:24px;color:#4A5568">PostgreSQL + Redis via Testcontainers</p></div>
+<div style="flex:1;display:flex;flex-direction:column;gap:6px;background:#E9E6DF;padding:24px 28px;border-radius:12px"><h3 style="font-size:28px;font-weight:600">Quality gates</h3><p style="font-size:24px;color:#4A5568">≥ 90 % coverage, Checkstyle, Snyk</p></div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6A7179">Concurrency suite · 13</p>
+<aside>(~15s, after the demo) The tests found a real problem I missed: two hundred and nine deadlocks. A simple lock fixed it. Now there are zero, and every run passes.</aside>
+</section>

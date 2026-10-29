@@ -1,0 +1,32 @@
+<section id="scaling" data-transition="fade" style="background:#F6F5F1;color:#14213D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<div style="display:flex;flex-direction:column;gap:16px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#B4521A;letter-spacing:2px">SCALING AND REPLICATION</p>
+<h2 style="font-size:64px;font-weight:700;line-height:1.15">Reads and writes take different paths</h2>
+</div>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FFFFFF;padding:36px 40px;border:2px solid #2B6CB0;border-radius:16px">
+<h3 style="font-size:32px;font-weight:600;color:#2B6CB0">Reads · ~10k/s (CQRS)</h3>
+<ul style="font-size:26px;line-height:1.5;color:#14213D;padding-left:28px">
+<li><b>Free times</b> ⇒ Redis slot ledger, no DB</li>
+<li><b>Gantt board</b> ⇒ read replicas, lag &lt; 1 s; stale edits get 412</li>
+<li><b>My appointments</b> ⇒ primary, so you see what you just booked</li>
+</ul>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FFFFFF;padding:36px 40px;border:2px solid #B4521A;border-radius:16px">
+<h3 style="font-size:32px;font-weight:600;color:#B4521A">Writes · ~1k/s</h3>
+<ul style="font-size:26px;line-height:1.5;color:#14213D;padding-left:28px">
+<li>One primary per region: ~330 writes/s, far below its limit</li>
+<li>Conflicts stay inside one dealership</li>
+<li>If a region outgrows it: shard by dealership_id</li>
+</ul>
+</div>
+</div>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:6px;background:#E9E6DF;padding:24px 28px;border-radius:12px"><h3 style="font-size:28px;font-weight:600">Pods</h3><p style="font-size:24px;color:#4A5568">stateless, HPA on CPU + RPS, min 3</p></div>
+<div style="flex:1;display:flex;flex-direction:column;gap:6px;background:#E9E6DF;padding:24px 28px;border-radius:12px"><h3 style="font-size:28px;font-weight:600">PgBouncer</h3><p style="font-size:24px;color:#4A5568">more pods, same DB connections</p></div>
+<div style="flex:1;display:flex;flex-direction:column;gap:6px;background:#E9E6DF;padding:24px 28px;border-radius:12px"><h3 style="font-size:28px;font-weight:600">Replicas</h3><p style="font-size:24px;color:#4A5568">2 ⇒ 6 on CPU or lag</p></div>
+<div style="flex:1;display:flex;flex-direction:column;gap:6px;background:#E9E6DF;padding:24px 28px;border-radius:12px"><h3 style="font-size:28px;font-weight:600">Redis</h3><p style="font-size:24px;color:#4A5568">cluster, 3 shards; if down, read the DB</p></div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6A7179">Built: primary / replica routing, Redis ledger + cache · Designed only: HPA, PgBouncer, sharding · 5</p>
+<aside>(~25s) How it scales. Reads and writes go different ways. Free times come from Redis, so they don't touch the database. The dispatcher board reads from replicas; they can be a second behind, and that's fine, because an old version can't overwrite a newer one. Your own bookings always read from the primary, so you see them right away. Writes are small: about three hundred per second per region, easy for one database. If a region ever grows too big, we split by dealership. Pods, replicas and Redis all scale out on their own.</aside>
+</section>

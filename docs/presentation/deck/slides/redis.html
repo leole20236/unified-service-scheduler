@@ -1,0 +1,28 @@
+<section id="redis" data-transition="fade" style="background:#F6F5F1;color:#14213D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<div style="display:flex;flex-direction:column;gap:16px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#B4521A;letter-spacing:2px">THE ROLE OF REDIS</p>
+<h2 style="font-size:64px;font-weight:700;line-height:1.15">Redis makes it fast; the database decides</h2>
+</div>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;padding:28px 32px;border:2px solid #2B6CB0;border-radius:16px">
+<h3 style="font-size:30px;font-weight:600;color:#2B6CB0">1 · Slot ledger</h3>
+<p style="font-size:26px;line-height:1.4;color:#4A5568">Each bay's and technician's day in memory. Free times need no DB query.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;padding:28px 32px;border:2px solid #2B6CB0;border-radius:16px">
+<h3 style="font-size:30px;font-weight:600;color:#2B6CB0">2 · 10-minute holds</h3>
+<p style="font-size:26px;line-height:1.4;color:#4A5568">One Lua script takes a bay + technician. Taken ⇒ 409 in ~1 ms, never reaches PostgreSQL.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;padding:28px 32px;border:2px solid #2B6CB0;border-radius:16px">
+<h3 style="font-size:30px;font-weight:600;color:#2B6CB0">3 · Read cache</h3>
+<p style="font-size:26px;line-height:1.4;color:#4A5568">Services, bays, technicians, opening hours. 10-minute TTL.</p>
+</div>
+</div>
+<table style="font-family:'IBM Plex Sans', Arial, sans-serif;font-size:26px;color:#14213D">
+<tr style="background:#14213D"><th style="width:38%;color:#F6F5F1">If Redis is wrong or down…</th><th style="width:62%;color:#F6F5F1">…what happens</th></tr>
+<tr style="background:#FFFFFF"><td>Loses holds after a failover</td><td>EXCLUDE rejects at confirm ⇒ 409; ledger rebuilt from the primary</td></tr>
+<tr style="background:#F6F5F1"><td>Misses an update after a crash</td><td>The next DB conflict marks the ledger stale; it heals itself</td></tr>
+<tr style="background:#FFFFFF"><td>Is completely down</td><td>Booking and free times go to the DB: slower, still correct</td></tr>
+</table>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6A7179">Built and tested · one dealership-day per hash tag, so the Lua script stays atomic in a cluster · 10</p>
+<aside>(~25s) Redis has three jobs, all about speed. First, it keeps each dealership's day in memory, so showing free times needs no database query. Second, it holds a slot for ten minutes. If the slot is already taken, the customer gets an answer in about a millisecond, and the database never sees that request. Third, it caches things that rarely change, like services and opening hours. But Redis never decides. If it loses data, the database still blocks the overlap. If it goes down, everything still works, just slower.</aside>
+</section>

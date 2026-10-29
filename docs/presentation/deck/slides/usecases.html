@@ -1,0 +1,28 @@
+<section id="usecases" data-transition="fade" style="background:#F6F5F1;color:#14213D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<div style="display:flex;flex-direction:column;gap:16px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#B4521A;letter-spacing:2px">USER ROLES, USE CASES AND UI · UI IS MOCKUPS ONLY</p>
+<h2 style="font-size:64px;font-weight:700;line-height:1.15">Two roles, one shared schedule</h2>
+</div>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:14px;background:#FFFFFF;padding:24px 32px;border:2px solid #2B6CB0;border-radius:16px">
+<p style="font-size:24px;color:#6A7179"><b style="font-size:32px;color:#2B6CB0">Customer</b> &#160;B2C · web or app, 24/7</p>
+<img src="/_blob/43d47e4a9843ec0030fdbf4bdb3c6105" alt="Customer booking app mockup: vehicle, services, pick a time, confirm" style="width:752px;height:260px;object-fit:contain;background:#F6F5F1;border:2px dashed #8A93A3;border-radius:12px">
+<div style="display:flex;flex-direction:column;gap:4px;background:#EAF1F8;padding:12px 20px;border-radius:10px">
+<p style="font-size:26px;font-weight:600">★ Book a service</p>
+<p style="font-size:24px;color:#4A5568">tap a time ⇒ <b style="color:#14213D">POST /me/holds</b> · confirm ⇒ <b style="color:#14213D">POST /me/appointments</b></p>
+</div>
+<p style="font-size:24px;color:#4A5568">Also: reschedule or cancel · my appointments · my vehicles</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:14px;background:#FFFFFF;padding:24px 32px;border:2px solid #B4521A;border-radius:16px">
+<p style="font-size:24px;color:#6A7179"><b style="font-size:32px;color:#B4521A">Dispatcher</b> &#160;B2B · workshop Gantt board</p>
+<img src="/_blob/6da98d1bf5be0edf7861b765c41d7abf" alt="Dispatcher Gantt board mockup of bays and technicians" style="width:752px;height:260px;object-fit:contain;background:#F6F5F1;border:2px dashed #8A93A3;border-radius:12px">
+<div style="display:flex;flex-direction:column;gap:4px;background:#F8EDE5;padding:12px 20px;border-radius:10px">
+<p style="font-size:26px;font-weight:600">★ Run the day</p>
+<p style="font-size:24px;color:#4A5568">board ⇒ <b style="color:#14213D">GET /schedule</b> · drag ⇒ <b style="color:#14213D">PATCH + If-Match</b></p>
+</div>
+<p style="font-size:24px;color:#4A5568">Also: walk-ins · check in ⇒ start ⇒ complete · block a bay</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6A7179">UI designed, not built · ★ main use cases · the next slides follow a customer booking · 3</p>
+<aside>(~25s) The system has two kinds of users. Customers book online: they pick a car and services, choose a free time, and confirm. In the app, tapping a time holds it, and confirming books it. Dispatchers run the workshop day on a board of bays and technicians; dragging a booking sends an update. I didn't build these screens. They're mockups to show how the UI uses the API. The main use case is a customer booking a service, and the next slides follow it.</aside>
+</section>

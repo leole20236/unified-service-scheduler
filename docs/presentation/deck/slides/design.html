@@ -1,0 +1,50 @@
+<section id="design" data-transition="fade" style="background:#F6F5F1;color:#14213D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<div style="display:flex;flex-direction:column;gap:16px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#B4521A;letter-spacing:2px">FULL SYSTEM DESIGN</p>
+<h2 style="font-size:64px;font-weight:700;line-height:1.15">Target architecture at Keyloop scale</h2>
+</div>
+<div style="display:flex;align-items:center;gap:12px">
+<div style="width:190px;display:flex;flex-direction:column;gap:6px;background:#FFFFFF;padding:20px;border:2px solid #14213D;border-radius:14px">,
+<h3 style="font-size:26px;font-weight:600">Clients</h3>
+<p style="font-size:24px;color:#4A5568">app + Gantt board</p>
+</div>
+<x-connector head="end" style="width:40px;color:#14213D;border-width:3px"></x-connector>
+<div style="width:210px;display:flex;flex-direction:column;gap:6px;background:#FFFFFF;padding:20px;border:2px solid #14213D;border-radius:14px">
+<h3 style="font-size:26px;font-weight:600">Global LB</h3>
+<p style="font-size:24px;color:#4A5568">routes by JWT region claim</p>
+</div>
+<x-connector head="end" style="width:40px;color:#14213D;border-width:3px"></x-connector>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;padding:20px 24px;border:2px dashed #8A93A3;border-radius:18px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#B4521A">REGION × 3 · eu-west · us-east · ap-southeast · no shared data</p>
+<div style="display:flex;align-items:center;gap:12px">
+<div style="width:230px;display:flex;flex-direction:column;gap:6px;background:#FFFFFF;padding:20px;border:2px solid #14213D;border-radius:14px">
+<h3 style="font-size:26px;font-weight:600">API Gateway</h3>
+<p style="font-size:24px;color:#4A5568">verifies JWT, adds identity headers</p>
+</div>
+<x-connector head="end" style="width:36px;color:#14213D;border-width:3px"></x-connector>
+<div style="width:210px;display:flex;flex-direction:column;gap:6px;background:#14213D;padding:20px;border-radius:14px">
+<h3 style="font-size:26px;font-weight:600;color:#F6F5F1">Scheduler</h3>
+<p style="font-size:24px;color:#C9D3E6">stateless pods, K8s HPA</p>
+</div>
+<x-connector head="end" style="width:36px;color:#14213D;border-width:3px"></x-connector>
+<div style="flex:1;display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;flex-direction:column;gap:2px;background:#FFFFFF;padding:14px 20px;border:2px solid #B4521A;border-radius:12px">
+<h3 style="font-size:26px;font-weight:600">PostgreSQL primary</h3>
+<p style="font-size:24px;color:#4A5568">writes, EXCLUDE, outbox · 2–6 replicas</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:2px;background:#FFFFFF;padding:14px 20px;border:2px solid #2B6CB0;border-radius:12px">
+<h3 style="font-size:26px;font-weight:600">Redis cluster</h3>
+<p style="font-size:24px;color:#4A5568">slot holds + read cache</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:2px;background:#FFFFFF;padding:14px 20px;border:2px solid #8A93A3;border-radius:12px">
+<h3 style="font-size:26px;font-weight:600">Outbox relay ⇒ Kafka / SNS-SQS</h3>
+<p style="font-size:24px;color:#4A5568">Email and Reporting consumers</p>
+</div>
+</div>
+</div>
+<p style="font-size:24px;color:#4A5568;background:#E9E6DF;padding:10px 20px;border-radius:10px">Observability: JSON logs ⇒ Fluent Bit ⇒ OpenSearch · Prometheus · OpenTelemetry</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6A7179">Design target ~10k reads/s, ~1k writes/s · full details in docs/system-design · 4</p>
+<aside>(~25s) Here's the full design. Users go to their own region: EU, US or Asia. Each region has its own copy of the system and shares no data. Inside a region, the gateway checks who you are. The scheduler runs on Kubernetes. PostgreSQL stores the bookings, Redis makes it fast, and events go to a message broker for emails and reports.</aside>
+</section>

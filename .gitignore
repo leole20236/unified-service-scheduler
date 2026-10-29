@@ -2,3 +2,9 @@
 *.iml
 target/
 .DS_Store
+
+# local credentials, never commit
+github
+# demo videos are shared as a link, not stored in git
+docs/demo/video/
+docs/demo/build-demo-video.py

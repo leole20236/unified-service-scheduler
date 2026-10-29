@@ -1,0 +1,36 @@
+<section id="doublebooking" data-transition="fade" style="background:#14213D;color:#F6F5F1;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:48px">
+<div style="display:flex;flex-direction:column;gap:16px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#F2A65A;letter-spacing:2px">DOUBLE BOOKING</p>
+<h2 style="font-size:64px;font-weight:700;line-height:1.15;color:#F6F5F1">Three layers, one judge</h2>
+</div>
+<div style="display:flex;gap:48px">
+<div style="width:820px;display:flex;flex-direction:column;gap:6px;background:#0D1730;padding:40px;border:1px solid #2E3E62;border-radius:16px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#8FA0C2;white-space:nowrap">-- resource_reservation: one row per</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#8FA0C2;white-space:nowrap">-- bay or technician a booking occupies</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#F6F5F1;white-space:nowrap"> </p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#F6F5F1;white-space:nowrap"><span style="color:#F2A65A">CONSTRAINT</span> no_double_booking</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#F6F5F1;white-space:nowrap">&#160;&#160;<span style="color:#F2A65A">EXCLUDE USING</span> gist (</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#F6F5F1;white-space:nowrap">&#160;&#160;&#160;&#160;resource_id <span style="color:#7FB3E8">WITH =</span>,</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#F6F5F1;white-space:nowrap">&#160;&#160;&#160;&#160;period&#160;&#160;&#160;&#160;&#160; <span style="color:#7FB3E8">WITH &amp;&amp;</span></p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#F6F5F1;white-space:nowrap">&#160;&#160;) <span style="color:#F2A65A">WHERE</span> (active);</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#F6F5F1;white-space:nowrap"> </p>
+<p style="font-size:26px;color:#C9D3E6;line-height:1.4">Same resource + overlapping time range ⇒ PostgreSQL refuses the insert (23P01), however many servers race.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<div style="display:flex;flex-direction:column;gap:6px;border-left:6px solid #7FB3E8;padding:4px 0 4px 28px">
+<h3 style="font-size:32px;font-weight:600;color:#F6F5F1">1 · Redis hold</h3>
+<p style="font-size:26px;color:#C9D3E6">Turns most collisions away early (previous slide).</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:6px;border-left:6px solid #7FB3E8;padding:4px 0 4px 28px">
+<h3 style="font-size:32px;font-weight:600;color:#F6F5F1">2 · Advisory lock</h3>
+<p style="font-size:26px;color:#C9D3E6">Per bay / technician, taken in sorted order. Queues writers, prevents deadlocks.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:6px;border-left:6px solid #F2A65A;padding:4px 0 4px 28px">
+<h3 style="font-size:32px;font-weight:600;color:#F2A65A">3 · EXCLUDE constraint</h3>
+<p style="font-size:26px;color:#C9D3E6">The only guarantee. It decides.</p>
+</div>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#8FA0C2">Rejected: check-then-insert (race) · Redlock (no fencing token) · fixed 15-min slot grid · 11</p>
+<aside>(~25s) This is the key part. PostgreSQL has a rule: the same bay or technician can never have two bookings at the same time. So double booking is impossible, even with many servers. The database is the judge. On top, a small lock per bay and technician, taken in order, stops requests from blocking each other.</aside>
+</section>

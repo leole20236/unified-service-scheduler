@@ -1,0 +1,57 @@
+{
+  "v": 4,
+  "attachments": {},
+  "createdOnFiles": {
+    "at": "2026-10-28T09:00:00Z",
+    "v": 1
+  },
+  "designSystems": [],
+  "faces": {
+    "ibm-plex-sans": {
+      "family": "IBM Plex Sans",
+      "href": "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600;700&display=swap"
+    },
+    "jetbrains-mono": {
+      "family": "JetBrains Mono",
+      "href": "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap"
+    }
+  },
+  "lists": "css",
+  "order": [
+    "cover",
+    "problem",
+    "usecases",
+    "design",
+    "scaling",
+    "scope",
+    "apiflow",
+    "erd",
+    "indexes",
+    "redis",
+    "doublebooking",
+    "demo",
+    "proof",
+    "aimethod",
+    "aidebates",
+    "close"
+  ],
+  "sections": {
+    "s1": {
+      "description": "The problem and the numbers that shape the design",
+      "start": "cover"
+    },
+    "s2": {
+      "description": "Architecture, API flow and how double booking is made impossible",
+      "start": "design"
+    },
+    "s3": {
+      "description": "How I worked with the AI and where it challenged me",
+      "start": "aimethod"
+    },
+    "s4": {
+      "description": "Takeaways",
+      "start": "close"
+    }
+  },
+  "title": "Unified Service Scheduler — 5-min talk"
+}
