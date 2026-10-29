@@ -1,8 +1,8 @@
 package com.keyloop.scheduler.hold;
 
-import com.keyloop.scheduler.booking.DbOccupancySource;
-import com.keyloop.scheduler.booking.Occupancy;
-import com.keyloop.scheduler.booking.OccupancySource;
+import com.keyloop.scheduler.booking.core.DbOccupancySource;
+import com.keyloop.scheduler.booking.domain.Occupancy;
+import com.keyloop.scheduler.booking.domain.OccupancySource;
 import com.keyloop.scheduler.catalog.DealershipView;
 import com.keyloop.scheduler.common.time.OpeningHoursCalendar;
 import java.time.LocalDate;

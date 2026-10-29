@@ -1,10 +1,10 @@
 package com.keyloop.scheduler.availability;
 
-import com.keyloop.scheduler.booking.BookingPolicy;
-import com.keyloop.scheduler.booking.JobPlan;
-import com.keyloop.scheduler.booking.JobPlanner;
-import com.keyloop.scheduler.booking.Occupancy;
-import com.keyloop.scheduler.booking.OccupancySource;
+import com.keyloop.scheduler.booking.domain.BookingPolicy;
+import com.keyloop.scheduler.booking.domain.JobPlan;
+import com.keyloop.scheduler.booking.domain.JobPlanner;
+import com.keyloop.scheduler.booking.domain.Occupancy;
+import com.keyloop.scheduler.booking.domain.OccupancySource;
 import com.keyloop.scheduler.catalog.CatalogService;
 import com.keyloop.scheduler.catalog.ResourceCatalog;
 import com.keyloop.scheduler.common.api.ValidationException;

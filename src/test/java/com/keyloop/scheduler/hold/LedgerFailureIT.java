@@ -6,7 +6,7 @@ import static com.keyloop.scheduler.support.Bookings.next;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 
-import com.keyloop.scheduler.booking.ReservationRow;
+import com.keyloop.scheduler.booking.domain.ReservationRow;
 import com.keyloop.scheduler.common.time.TimeRange;
 import com.keyloop.scheduler.support.Bookings;
 import com.keyloop.scheduler.support.Fixtures;

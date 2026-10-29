@@ -1,6 +1,6 @@
 package com.keyloop.scheduler.query;
 
-import com.keyloop.scheduler.booking.AppointmentStatus;
+import com.keyloop.scheduler.booking.domain.AppointmentStatus;
 import com.keyloop.scheduler.query.CursorCodec.Position;
 import java.sql.Timestamp;
 import java.time.Instant;

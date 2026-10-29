@@ -1,7 +1,7 @@
 package com.keyloop.scheduler.hold;
 
-import com.keyloop.scheduler.booking.AppointmentCommitted;
-import com.keyloop.scheduler.booking.BookingListener;
+import com.keyloop.scheduler.booking.event.AppointmentCommitted;
+import com.keyloop.scheduler.booking.event.BookingListener;
 import java.util.List;
 import org.springframework.stereotype.Component;
 

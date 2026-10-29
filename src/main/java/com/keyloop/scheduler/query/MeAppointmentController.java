@@ -1,8 +1,8 @@
 package com.keyloop.scheduler.query;
 
-import com.keyloop.scheduler.booking.AppointmentStatus;
-import com.keyloop.scheduler.booking.CustomerCancelService;
-import com.keyloop.scheduler.booking.RescheduleService;
+import com.keyloop.scheduler.booking.change.CustomerCancelService;
+import com.keyloop.scheduler.booking.change.RescheduleService;
+import com.keyloop.scheduler.booking.domain.AppointmentStatus;
 import com.keyloop.scheduler.common.api.ValidationException;
 import com.keyloop.scheduler.common.security.CallerContext;
 import com.keyloop.scheduler.common.security.DealershipAccess;

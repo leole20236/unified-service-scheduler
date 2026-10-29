@@ -28,6 +28,29 @@ class ArchitectureTest {
               resideInAPackage("..booking..").and(simpleNameEndingWith("Repository")));
 
   @ArchTest
+  static final ArchRule bookingDomainDependsOnNoOtherBookingPackage =
+      noClasses()
+          .that()
+          .resideInAPackage("..booking.domain..")
+          .should()
+          .dependOnClassesThat()
+          .resideInAnyPackage(
+              "..booking.core..",
+              "..booking.create..",
+              "..booking.change..",
+              "..booking.block..",
+              "..booking.event..");
+
+  @ArchTest
+  static final ArchRule bookingCoreDoesNotDependOnUseCases =
+      noClasses()
+          .that()
+          .resideInAPackage("..booking.core..")
+          .should()
+          .dependOnClassesThat()
+          .resideInAnyPackage("..booking.create..", "..booking.change..", "..booking.block..");
+
+  @ArchTest
   static final ArchRule controllersDoNotUseRepositoriesDirectly =
       noClasses()
           .that()

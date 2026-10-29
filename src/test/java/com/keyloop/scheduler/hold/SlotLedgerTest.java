@@ -8,9 +8,9 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import com.keyloop.scheduler.booking.OccupancyRepository;
-import com.keyloop.scheduler.booking.ReservationRow;
-import com.keyloop.scheduler.booking.ResourcePair;
+import com.keyloop.scheduler.booking.core.OccupancyRepository;
+import com.keyloop.scheduler.booking.domain.ReservationRow;
+import com.keyloop.scheduler.booking.domain.ResourcePair;
 import com.keyloop.scheduler.catalog.BayView;
 import com.keyloop.scheduler.catalog.CatalogService;
 import com.keyloop.scheduler.catalog.ResourceCatalog;

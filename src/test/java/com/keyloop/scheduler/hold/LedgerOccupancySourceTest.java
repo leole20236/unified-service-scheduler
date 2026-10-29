@@ -8,8 +8,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import com.keyloop.scheduler.booking.DbOccupancySource;
-import com.keyloop.scheduler.booking.Occupancy;
+import com.keyloop.scheduler.booking.core.DbOccupancySource;
+import com.keyloop.scheduler.booking.domain.Occupancy;
 import com.keyloop.scheduler.common.time.TimeRange;
 import com.keyloop.scheduler.support.CatalogFixtures;
 import com.keyloop.scheduler.support.Fixtures;

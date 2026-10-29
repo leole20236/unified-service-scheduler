@@ -1,7 +1,7 @@
 package com.keyloop.scheduler.availability;
 
-import com.keyloop.scheduler.booking.JobPlan;
-import com.keyloop.scheduler.booking.Occupancy;
+import com.keyloop.scheduler.booking.domain.JobPlan;
+import com.keyloop.scheduler.booking.domain.Occupancy;
 import com.keyloop.scheduler.catalog.BayView;
 import com.keyloop.scheduler.catalog.DealershipView;
 import com.keyloop.scheduler.catalog.ResourceCatalog;

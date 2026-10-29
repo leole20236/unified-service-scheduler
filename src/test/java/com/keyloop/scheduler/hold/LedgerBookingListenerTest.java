@@ -4,8 +4,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 
-import com.keyloop.scheduler.booking.AppointmentCommitted;
-import com.keyloop.scheduler.booking.ReservationRow;
+import com.keyloop.scheduler.booking.domain.ReservationRow;
+import com.keyloop.scheduler.booking.event.AppointmentCommitted;
 import com.keyloop.scheduler.common.time.TimeRange;
 import com.keyloop.scheduler.support.Fixtures;
 import java.time.Instant;

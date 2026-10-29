@@ -276,11 +276,22 @@ If Redis is down or wrong, booking still works: it is slower, and the database s
 
 ## 6. Project layout
 
+Packages follow features, not layers (no global `controller/`, `service/`, `dto/`), so each
+feature's internals can stay package-private. `ArchitectureTest` (ArchUnit) enforces the
+boundaries: the read side never uses write-side repositories, controllers never call
+repositories, and `booking.domain` depends on no other booking package.
+
 ```
 src/main/java/com/keyloop/scheduler/
   availability/   free start times (Redis slot ledger)
   hold/           10-minute slot holds (Redis + Lua)
-  booking/        bookings, dispatcher moves, status changes, blocks (write side)
+  booking/        write side, split by use case:
+    create/       new bookings: customer app and dispatcher walk-ins, idempotency
+    change/       cancel, reschedule, dispatcher edits, check-in / start / hold / complete
+    block/        block a bay or technician
+    domain/       states, rules, booking policies, state machine, value types
+    core/         repositories, resource locks, Redis ledger writes, bay + technician allocation
+    event/        appointment and block events (written to the outbox)
   query/          my appointments, Gantt schedule (read side, replica)
   catalog/        dealerships and services
   customer/       customers and vehicles

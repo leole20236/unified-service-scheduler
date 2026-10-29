@@ -2,9 +2,9 @@ package com.keyloop.scheduler.availability;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.keyloop.scheduler.booking.JobPlan;
-import com.keyloop.scheduler.booking.JobPlanner;
-import com.keyloop.scheduler.booking.Occupancy;
+import com.keyloop.scheduler.booking.domain.JobPlan;
+import com.keyloop.scheduler.booking.domain.JobPlanner;
+import com.keyloop.scheduler.booking.domain.Occupancy;
 import com.keyloop.scheduler.catalog.BayView;
 import com.keyloop.scheduler.catalog.DealershipView;
 import com.keyloop.scheduler.catalog.ResourceCatalog;

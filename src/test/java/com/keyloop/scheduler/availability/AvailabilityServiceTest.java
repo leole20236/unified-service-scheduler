@@ -9,8 +9,8 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.keyloop.scheduler.booking.Occupancy;
-import com.keyloop.scheduler.booking.OccupancySource;
+import com.keyloop.scheduler.booking.domain.Occupancy;
+import com.keyloop.scheduler.booking.domain.OccupancySource;
 import com.keyloop.scheduler.catalog.BayView;
 import com.keyloop.scheduler.catalog.CatalogService;
 import com.keyloop.scheduler.catalog.ResourceCatalog;

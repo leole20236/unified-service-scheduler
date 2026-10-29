@@ -1,6 +1,6 @@
 package com.keyloop.scheduler.query;
 
-import com.keyloop.scheduler.booking.AppointmentStatus;
+import com.keyloop.scheduler.booking.domain.AppointmentStatus;
 import com.keyloop.scheduler.common.api.NotFoundException;
 import com.keyloop.scheduler.common.api.ValidationException;
 import com.keyloop.scheduler.common.db.PrimaryRead;

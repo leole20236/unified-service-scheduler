@@ -15,9 +15,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import com.keyloop.scheduler.booking.AllocationService;
-import com.keyloop.scheduler.booking.Occupancy;
-import com.keyloop.scheduler.booking.ResourcePair;
+import com.keyloop.scheduler.booking.core.AllocationService;
+import com.keyloop.scheduler.booking.domain.Occupancy;
+import com.keyloop.scheduler.booking.domain.ResourcePair;
 import com.keyloop.scheduler.catalog.BayView;
 import com.keyloop.scheduler.catalog.CatalogService;
 import com.keyloop.scheduler.catalog.ResourceCatalog;
@@ -68,10 +68,10 @@ class HoldServiceTest {
   private final AllocationService allocation = mock(AllocationService.class);
   private final CatalogService catalogs = mock(CatalogService.class);
   private final CustomerService customers = mock(CustomerService.class);
-  private final com.keyloop.scheduler.booking.AppointmentRepository appointments =
-      mock(com.keyloop.scheduler.booking.AppointmentRepository.class);
-  private final com.keyloop.scheduler.booking.ReservationRepository reservations =
-      mock(com.keyloop.scheduler.booking.ReservationRepository.class);
+  private final com.keyloop.scheduler.booking.core.AppointmentRepository appointments =
+      mock(com.keyloop.scheduler.booking.core.AppointmentRepository.class);
+  private final com.keyloop.scheduler.booking.core.ReservationRepository reservations =
+      mock(com.keyloop.scheduler.booking.core.ReservationRepository.class);
   private final HoldService service =
       new HoldService(ledger, allocation, catalogs, customers, appointments, reservations);
 
@@ -352,9 +352,11 @@ class HoldServiceTest {
     assertThat(HoldPayload.parse(payload.toJson())).isEqualTo(payload);
   }
 
-  private static com.keyloop.scheduler.booking.AppointmentState appointment(
-      UUID customer, UUID dealership, com.keyloop.scheduler.booking.AppointmentStatus status) {
-    return new com.keyloop.scheduler.booking.AppointmentState(
+  private static com.keyloop.scheduler.booking.domain.AppointmentState appointment(
+      UUID customer,
+      UUID dealership,
+      com.keyloop.scheduler.booking.domain.AppointmentStatus status) {
+    return new com.keyloop.scheduler.booking.domain.AppointmentState(
         APPOINTMENT,
         customer,
         dealership,
@@ -384,7 +386,7 @@ class HoldServiceTest {
                 appointment(
                     Fixtures.ALICE,
                     Fixtures.RIVERSIDE,
-                    com.keyloop.scheduler.booking.AppointmentStatus.BOOKED)));
+                    com.keyloop.scheduler.booking.domain.AppointmentStatus.BOOKED)));
     when(reservations.activeIds(APPOINTMENT)).thenReturn(List.of(reservation));
     when(ledger.occupancy(any(), any(), eq(true), any(), any())).thenReturn(Occupancy.empty());
     when(ledger.acquire(any(), any(), any(), any(), any(), any(), anyString(), any()))
@@ -416,7 +418,7 @@ class HoldServiceTest {
                 appointment(
                     Fixtures.BOB,
                     Fixtures.RIVERSIDE,
-                    com.keyloop.scheduler.booking.AppointmentStatus.BOOKED)),
+                    com.keyloop.scheduler.booking.domain.AppointmentStatus.BOOKED)),
             Optional.empty());
 
     org.assertj.core.api.Assertions.assertThatThrownBy(
@@ -436,12 +438,12 @@ class HoldServiceTest {
                 appointment(
                     Fixtures.ALICE,
                     Fixtures.RIVERSIDE,
-                    com.keyloop.scheduler.booking.AppointmentStatus.CANCELLED)),
+                    com.keyloop.scheduler.booking.domain.AppointmentStatus.CANCELLED)),
             Optional.of(
                 appointment(
                     Fixtures.ALICE,
                     Fixtures.HUDSON,
-                    com.keyloop.scheduler.booking.AppointmentStatus.BOOKED)));
+                    com.keyloop.scheduler.booking.domain.AppointmentStatus.BOOKED)));
 
     org.assertj.core.api.Assertions.assertThatThrownBy(
             () -> service.create(alice, rescheduleRequest()))
