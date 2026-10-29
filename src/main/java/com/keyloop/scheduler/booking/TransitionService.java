@@ -28,8 +28,6 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionOperations;
@@ -41,7 +39,13 @@ import org.springframework.transaction.support.TransactionOperations;
  * take one {@code lockAll} over every resource involved (old and new), before the appointment row
  * is updated; if the appointment changed meanwhile and the caller gave no {@code If-Match}, the
  * whole attempt starts again on the new state (at most three times). The Redis ledger follows after
- * commit.
+ * commit, per local day of each reservation's own period.
+ *
+ * <p>RESUME may continue on a later day (waiting for parts until tomorrow). It reserves the planned
+ * minutes not yet worked: the sum of the booked services' durations minus {@code worked_minutes}
+ * (at least 5). Known limitation: a dispatcher resize made before the hold is not carried into
+ * RESUME (there is no stored planned duration; the appointment's period stops describing it after
+ * the first resume).
  */
 @Service
 public class TransitionService {
@@ -51,7 +55,6 @@ public class TransitionService {
   static final Duration RESUME_GRACE = Duration.ofMinutes(15);
   static final int MIN_REMAINING_MINUTES = 5;
 
-  private static final Logger LOG = LoggerFactory.getLogger(TransitionService.class);
   private static final String AGGREGATE = "Appointment";
   private static final String STATUS_CHANGED = "AppointmentStatusChanged";
   private static final String CANCELLED = "AppointmentCancelled";
@@ -64,10 +67,10 @@ public class TransitionService {
   private final ResourceLocks locks;
   private final AppointmentReadRepository reads;
   private final OutboxWriter outbox;
-  private final SlotLedger ledger;
   private final DbClock clock;
   private final TransactionOperations transactions;
   private final HoldGuard holds;
+  private final LedgerWrites ledgerWrites;
 
   /** Creates the service; {@code transactions} runs each attempt in a new transaction. */
   public TransitionService(
@@ -86,10 +89,10 @@ public class TransitionService {
     this.locks = locks;
     this.reads = reads;
     this.outbox = outbox;
-    this.ledger = ledger;
     this.clock = clock;
     this.transactions = transactions;
     this.holds = new HoldGuard(ledger);
+    this.ledgerWrites = new LedgerWrites(ledger);
   }
 
   /**
@@ -114,12 +117,12 @@ public class TransitionService {
       Prepared p = prepare(dealershipId, appointmentId, action, actionBody, expectedVersion);
       try {
         Done done = transactions.execute(status -> persist(p, !last));
-        writeThrough(p, done);
+        ledgerWrites.apply(p.dealership(), done.removed(), done.added());
         return done.view();
       } catch (MovedUnderUsException e) {
         attempt++;
       } catch (ReservationConflictException e) {
-        markDirty(dealershipId, p.newDate());
+        ledgerWrites.markDirty(dealershipId, p.newDate());
         throw unavailable(p);
       } catch (RuntimeException e) {
         if (!deadlockRetried && SqlStates.has(e, SqlStates.DEADLOCK_DETECTED)) {
@@ -151,11 +154,11 @@ public class TransitionService {
       boolean releaseBay,
       String reason,
       List<ReservationRow> resumeRows,
-      LocalDate oldDate,
       LocalDate newDate) {}
 
   /** What a committed action changed. */
-  private record Done(List<UUID> removed, Map<UUID, ReservationRow> added, AppointmentView view) {}
+  private record Done(
+      Map<UUID, TimeRange> removed, Map<UUID, ReservationRow> added, AppointmentView view) {}
 
   private Prepared prepare(
       UUID dealershipId, UUID appointmentId, Action action, Object body, OptionalLong expected) {
@@ -172,12 +175,12 @@ public class TransitionService {
     }
     ResourceCatalog catalog = catalogs.get(dealershipId);
     DealershipView d = catalog.dealership();
-    LocalDate oldDate = state.period().start().atZone(d.zoneId()).toLocalDate();
+
     List<UUID> lockSet = List.of(state.serviceBayId(), state.technicianId());
     boolean releaseBay = false;
     String reason = null;
     List<ReservationRow> resumeRows = null;
-    LocalDate newDate = oldDate;
+    LocalDate newDate = state.period().start().atZone(d.zoneId()).toLocalDate();
     StatusChange change;
     Set<AppointmentStatus> from = AppointmentStateMachine.allowedFrom(action);
     AppointmentStatus to = AppointmentStateMachine.target(action);
@@ -225,17 +228,7 @@ public class TransitionService {
           change = new StatusChange(from, to, false, false, false, false, null, null);
     }
     return new Prepared(
-        action,
-        state,
-        d,
-        expected,
-        change,
-        lockSet,
-        releaseBay,
-        reason,
-        resumeRows,
-        oldDate,
-        newDate);
+        action, state, d, expected, change, lockSet, releaseBay, reason, resumeRows, newDate);
   }
 
   /**
@@ -285,6 +278,12 @@ public class TransitionService {
         appointments
             .transition(id, state.dealershipId(), version, p.change())
             .orElseThrow(() -> diagnose(p, mayRestart));
+    // Each reservation's own period decides which ledger days it leaves (a resumed job's
+    // reservations may sit on a later day than the appointment's start).
+    Map<UUID, TimeRange> before = new LinkedHashMap<>();
+    if (p.action().touchesReservations()) {
+      reservations.activeRows(id).forEach(r -> before.put(r.reservationId(), r.row().period()));
+    }
     List<UUID> removed = new ArrayList<>();
     Map<UUID, ReservationRow> added = new LinkedHashMap<>();
     switch (p.action()) {
@@ -313,7 +312,9 @@ public class TransitionService {
       }
     }
     writeEvents(p, done);
-    return new Done(removed, added, reads.find(id).orElseThrow());
+    Map<UUID, TimeRange> removedPeriods = new LinkedHashMap<>();
+    removed.forEach(r -> removedPeriods.put(r, before.getOrDefault(r, state.period())));
+    return new Done(removedPeriods, added, reads.find(id).orElseThrow());
   }
 
   private void truncate(
@@ -421,36 +422,5 @@ public class TransitionService {
         DispatcherResources.taken(p.dealership(), technician.period().start()),
         List.of(),
         DispatcherResources.others(conflicts, p.state().id()));
-  }
-
-  /** After commit: changed reservations leave or re-enter the ledger; Redis failures only heal. */
-  private void writeThrough(Prepared p, Done done) {
-    if (done.removed().isEmpty() && done.added().isEmpty()) {
-      return;
-    }
-    UUID dealershipId = p.state().dealershipId();
-    try {
-      if (p.oldDate().equals(p.newDate())) {
-        ledger.applyCommitted(dealershipId, p.newDate(), done.removed(), done.added());
-      } else {
-        ledger.applyCommitted(dealershipId, p.oldDate(), done.removed(), Map.of());
-        ledger.applyCommitted(dealershipId, p.newDate(), List.of(), done.added());
-      }
-    } catch (RuntimeException e) {
-      LOG.warn(
-          "Ledger write-through of {} {} failed: {}", p.action(), p.state().id(), e.toString());
-      markDirty(dealershipId, p.oldDate());
-      if (!p.oldDate().equals(p.newDate())) {
-        markDirty(dealershipId, p.newDate());
-      }
-    }
-  }
-
-  private void markDirty(UUID dealershipId, LocalDate date) {
-    try {
-      ledger.markDirty(dealershipId, date);
-    } catch (RuntimeException e) {
-      LOG.warn("Could not mark ledger of {} dirty: {}", dealershipId, e.toString());
-    }
   }
 }

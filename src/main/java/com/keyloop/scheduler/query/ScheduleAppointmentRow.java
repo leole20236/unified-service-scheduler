@@ -4,7 +4,10 @@ import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
-/** An appointment of the board as read from the database. */
+/**
+ * An appointment of the board as read from the database, with its active reservations' periods
+ * (null when it has none of that type): a resumed or held job is drawn from its current segment.
+ */
 public record ScheduleAppointmentRow(
     UUID id,
     long version,
@@ -19,4 +22,8 @@ public record ScheduleAppointmentRow(
     String registration,
     String make,
     String model,
-    List<String> serviceCodes) {}
+    List<String> serviceCodes,
+    Instant technicianFrom,
+    Instant technicianTo,
+    Instant bayFrom,
+    Instant bayTo) {}

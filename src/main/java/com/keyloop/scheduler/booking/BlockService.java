@@ -12,14 +12,11 @@ import com.keyloop.scheduler.common.security.CallerContext;
 import com.keyloop.scheduler.common.time.TimeRange;
 import com.keyloop.scheduler.hold.SlotLedger;
 import com.keyloop.scheduler.outbox.OutboxWriter;
-import java.time.LocalDate;
-import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionOperations;
@@ -35,7 +32,6 @@ public class BlockService {
 
   static final int MAX_REASON = 200;
 
-  private static final Logger LOG = LoggerFactory.getLogger(BlockService.class);
   private static final String AGGREGATE = "ResourceBlock";
   private static final String CREATED = "ResourceBlockCreated";
   private static final String REMOVED = "ResourceBlockRemoved";
@@ -44,9 +40,9 @@ public class BlockService {
   private final ReservationRepository reservations;
   private final ResourceLocks locks;
   private final OutboxWriter outbox;
-  private final SlotLedger ledger;
   private final TransactionOperations transactions;
   private final HoldGuard holds;
+  private final LedgerWrites ledgerWrites;
 
   /** Creates the service; {@code transactions} runs each write in a new transaction. */
   public BlockService(
@@ -60,9 +56,9 @@ public class BlockService {
     this.reservations = reservations;
     this.locks = locks;
     this.outbox = outbox;
-    this.ledger = ledger;
     this.transactions = transactions;
     this.holds = new HoldGuard(ledger);
+    this.ledgerWrites = new LedgerWrites(ledger);
   }
 
   /**
@@ -204,27 +200,12 @@ public class BlockService {
   /** After commit: the block enters (or leaves) the ledger of every day it covers. */
   private void writeThrough(
       DealershipView d, TimeRange period, List<UUID> removed, Map<UUID, ReservationRow> added) {
-    List<LocalDate> failed = new ArrayList<>();
-    for (LocalDate date : HoldGuard.dates(d, period)) {
-      try {
-        ledger.applyCommitted(d.id(), date, removed, added);
-      } catch (RuntimeException e) {
-        LOG.warn("Ledger write-through of a block on {} failed: {}", date, e.toString());
-        failed.add(date);
-      }
-    }
-    failed.forEach(date -> markDirty(d, date));
+    Map<UUID, TimeRange> removedPeriods = new LinkedHashMap<>();
+    removed.forEach(id -> removedPeriods.put(id, period));
+    ledgerWrites.apply(d, removedPeriods, added);
   }
 
   private void markDirty(DealershipView d, TimeRange period) {
-    HoldGuard.dates(d, period).forEach(date -> markDirty(d, date));
-  }
-
-  private void markDirty(DealershipView d, LocalDate date) {
-    try {
-      ledger.markDirty(d.id(), date);
-    } catch (RuntimeException e) {
-      LOG.warn("Could not mark ledger of {} dirty: {}", d.id(), e.toString());
-    }
+    HoldGuard.dates(d, period).forEach(date -> ledgerWrites.markDirty(d.id(), date));
   }
 }

@@ -5,6 +5,10 @@ import static com.keyloop.scheduler.support.Bookings.at;
 import static com.keyloop.scheduler.support.Bookings.next;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.keyloop.scheduler.catalog.CatalogService;
+import com.keyloop.scheduler.catalog.DealershipView;
+import com.keyloop.scheduler.common.time.TimeRange;
+import com.keyloop.scheduler.hold.SlotLedger;
 import com.keyloop.scheduler.support.ConcurrencyHarness;
 import com.keyloop.scheduler.support.Dispatch;
 import com.keyloop.scheduler.support.Fixtures;
@@ -25,6 +29,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
 /**
@@ -35,6 +40,9 @@ class TransitionApiIT extends IntegrationTest {
 
   private static final LocalDate WEDNESDAY = next(DayOfWeek.WEDNESDAY);
   private static final Instant WED_NINE = at(WEDNESDAY, 9, 0, LONDON);
+
+  @Autowired private SlotLedger ledger;
+  @Autowired private CatalogService catalogs;
 
   private JdbcClient client;
 
@@ -301,6 +309,32 @@ class TransitionApiIT extends IntegrationTest {
     assertThat(lee.statusCode()).as(lee.asString()).isEqualTo(422);
     assertThat(lee.jsonPath().getString("code")).isEqualTo("TECHNICIAN_NOT_QUALIFIED");
     assertThat(early.statusCode()).as(early.asString()).isEqualTo(400);
+  }
+
+  @Test
+  void holdAfterResumeOnTheNextDayLeavesThatDaysLedger() {
+    String id = soloJobOnHold();
+    LocalDate today = Dispatch.dbNow(jdbc).atZone(LONDON).toLocalDate();
+    LocalDate tomorrow = today.plusDays(1);
+    Instant resumeAt = at(tomorrow, 10, 0, LONDON);
+    Dispatch.acted(Fixtures.SOLO, id, "resume", Map.of("resumeAt", resumeAt.toString()));
+    DealershipView solo = catalogs.get(Fixtures.SOLO).dealership();
+    ledger.ensureLoaded(Fixtures.SOLO, today, SlotLedger.dayWindow(solo, today));
+    ledger.ensureLoaded(Fixtures.SOLO, tomorrow, SlotLedger.dayWindow(solo, tomorrow));
+    TimeRange resumed = new TimeRange(resumeAt, resumeAt.plus(Duration.ofMinutes(45)));
+    assertThat(confirmed(tomorrow).isFree(Fixtures.SOLO_TECH, resumed)).isFalse();
+    final Occupancy todayBefore = confirmed(today);
+
+    Dispatch.acted(Fixtures.SOLO, id, "hold", Map.of("holdReason", "PARTS"));
+
+    assertThat(confirmed(tomorrow).isFree(Fixtures.SOLO_TECH, resumed)).isTrue();
+    assertThat(confirmed(tomorrow).isFree(Fixtures.SOLO_BAY, resumed)).isFalse();
+    assertThat(confirmed(today)).isEqualTo(todayBefore);
+    NoDoubleBookingAssert.verify(client);
+  }
+
+  private Occupancy confirmed(LocalDate date) {
+    return ledger.occupancy(Fixtures.SOLO, date, false, null);
   }
 
   @Test

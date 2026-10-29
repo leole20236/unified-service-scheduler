@@ -18,9 +18,9 @@ public final class NoDoubleBookingAssert {
    * Fails, listing the offending rows, if (a) two active reservations on one resource overlap, or
    * (b) a BOOKED / CHECKED_IN / IN_PROGRESS appointment does not have exactly one active bay and
    * one active technician reservation on its own bay and technician, or its technician
-   * reservation's {@code [start_at, end_at)} differs from the appointment's. A resumed job's
-   * technician reservation covers only the current work segment, so it may instead start at the
-   * appointment's {@code started_at} (spec 6.2, RESUME).
+   * reservation's {@code [start_at, end_at)} differs from the appointment's. A resumed IN_PROGRESS
+   * job's technician reservation covers only the current work segment, so it may instead start at
+   * the appointment's {@code started_at} (spec 6.2, RESUME).
    */
   public static void verify(JdbcClient jdbc) {
     List<Map<String, Object>> overlaps =
@@ -51,7 +51,9 @@ public final class NoDoubleBookingAssert {
                        count(r.id) FILTER (WHERE r.technician_id IS NOT NULL
                                              AND (r.technician_id <> ap.technician_id
                                                   OR (r.start_at <> ap.start_at
-                                                      AND r.start_at IS DISTINCT FROM ap.started_at)
+                                                      AND (ap.status <> 'IN_PROGRESS'
+                                                           OR r.start_at
+                                                              IS DISTINCT FROM ap.started_at))
                                                   OR r.end_at <> ap.end_at))
                          AS mismatched_technicians
                 FROM appointment ap
@@ -65,7 +67,9 @@ public final class NoDoubleBookingAssert {
                     OR count(r.id) FILTER (WHERE r.technician_id IS NOT NULL
                                              AND (r.technician_id <> ap.technician_id
                                                   OR (r.start_at <> ap.start_at
-                                                      AND r.start_at IS DISTINCT FROM ap.started_at)
+                                                      AND (ap.status <> 'IN_PROGRESS'
+                                                           OR r.start_at
+                                                              IS DISTINCT FROM ap.started_at))
                                                   OR r.end_at <> ap.end_at)) > 0
                 """)
             .query()

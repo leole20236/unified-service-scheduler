@@ -13,6 +13,7 @@ import com.keyloop.scheduler.support.IntegrationTest;
 import io.restassured.RestAssured;
 import io.restassured.path.json.JsonPath;
 import io.restassured.response.Response;
+import java.sql.Timestamp;
 import java.time.DayOfWeek;
 import java.time.Duration;
 import java.time.Instant;
@@ -170,6 +171,53 @@ class ScheduleApiIT extends IntegrationTest {
         .containsEntry("remainingMinutes", 45)
         .containsEntry("technicianId", null)
         .containsEntry("overrun", false);
+  }
+
+  @Test
+  void jobHeldTodayAndResumedTomorrowIsDrawnOnTheDayOfItsSegment() {
+    String id =
+        Dispatch.booked(
+            Fixtures.SOLO, Fixtures.ALICE, Fixtures.ALICE_FOCUS, WED_NINE, Fixtures.OIL_CHANGE);
+    Instant started = Dispatch.dbNow(jdbc).minus(Duration.ofMinutes(10));
+    Dispatch.shift(jdbc, id, started);
+    Dispatch.acted(Fixtures.SOLO, id, "check-in", null);
+    Dispatch.acted(Fixtures.SOLO, id, "start", null);
+    Dispatch.acted(Fixtures.SOLO, id, "hold", Map.of("holdReason", "PARTS", "releaseBay", true));
+    Instant holdTime =
+        jdbc.queryForObject(
+                "SELECT end_at FROM resource_reservation WHERE appointment_id = ?::uuid AND active"
+                    + " AND technician_id IS NOT NULL",
+                Timestamp.class,
+                id)
+            .toInstant();
+    LocalDate today = started.atZone(LONDON).toLocalDate();
+    LocalDate tomorrow = today.plusDays(1);
+
+    Map<String, Object> held = only(Dispatch.schedule(Fixtures.SOLO, today, null), id);
+    assertThat(held)
+        .containsEntry("status", "ON_HOLD")
+        .containsEntry("start", started.toString())
+        .containsEntry("end", holdTime.toString())
+        .containsEntry("remainingMinutes", 45);
+
+    Instant resumeAt = at(tomorrow, 10, 0, LONDON);
+    Dispatch.acted(Fixtures.SOLO, id, "resume", Map.of("resumeAt", resumeAt.toString()));
+
+    Map<String, Object> resumed = only(Dispatch.schedule(Fixtures.SOLO, tomorrow, null), id);
+    assertThat(resumed)
+        .containsEntry("status", "IN_PROGRESS")
+        .containsEntry("start", resumeAt.toString())
+        .containsEntry("end", resumeAt.plus(Duration.ofMinutes(45)).toString());
+    assertThat(Dispatch.schedule(Fixtures.SOLO, today, null).jsonPath().getList("items", Map.class))
+        .isEmpty();
+  }
+
+  private static Map<String, Object> only(Response board, String id) {
+    assertThat(board.statusCode()).as(board.asString()).isEqualTo(200);
+    List<Map<String, Object>> items = board.jsonPath().getList("items");
+    assertThat(items).hasSize(1);
+    assertThat(items.get(0)).containsEntry("id", id);
+    return items.get(0);
   }
 
   @Test

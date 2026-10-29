@@ -700,6 +700,42 @@ class TransitionServiceTest {
     verify(ledger).markDirty(Fixtures.HUDSON, DAY);
   }
 
+  @Test
+  void holdOfJobResumedOnLaterDayWritesThroughTheResumeDayOnly() {
+    given(AppointmentStatus.IN_PROGRESS, 6);
+    transitionsTo(7, PLANNED);
+    Instant nextDay = PLANNED.start().plus(Duration.ofDays(1));
+    TimeRange resumed = new TimeRange(nextDay, nextDay.plus(Duration.ofMinutes(45)));
+    TimeRange worked = new TimeRange(nextDay, nextDay.plus(Duration.ofMinutes(10)));
+    when(reservations.activeRows(APPOINTMENT))
+        .thenReturn(
+            List.of(
+                new ActiveReservation(
+                    BAY_RESERVATION,
+                    new ReservationRow(
+                        Fixtures.HUDSON_BAY_1, ReservationRow.BAY, resumed.extendEnd(BUFFER))),
+                new ActiveReservation(
+                    TECH_RESERVATION,
+                    new ReservationRow(Fixtures.JO, ReservationRow.TECHNICIAN, resumed))));
+    when(reservations.truncate(APPOINTMENT, ReservationRow.TECHNICIAN, Duration.ZERO))
+        .thenReturn(
+            List.of(
+                new TruncatedReservation(
+                    TECH_RESERVATION, Fixtures.JO, ReservationRow.TECHNICIAN, worked)));
+
+    apply(Action.HOLD, new HoldActionRequest(HoldReason.PARTS, false));
+
+    verify(ledger)
+        .applyCommitted(
+            Fixtures.HUDSON,
+            DAY.plusDays(1),
+            List.of(TECH_RESERVATION),
+            Map.of(
+                TECH_RESERVATION,
+                new ReservationRow(Fixtures.JO, ReservationRow.TECHNICIAN, worked)));
+    verify(ledger, never()).applyCommitted(eq(Fixtures.HUDSON), eq(DAY), any(), any());
+  }
+
   private static CannotAcquireLockException deadlock() {
     return new CannotAcquireLockException(
         "deadlock", new java.sql.SQLException("deadlock detected", "40P01"));

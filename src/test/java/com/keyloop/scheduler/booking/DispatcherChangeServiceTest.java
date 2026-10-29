@@ -403,7 +403,12 @@ class DispatcherChangeServiceTest {
 
     assertThatThrownBy(() -> change(3, new DispatcherChangeRequest(null, null, null, 4, false)))
         .isInstanceOf(ValidationException.class);
-    assertThatThrownBy(() -> change(3, new DispatcherChangeRequest(null, null, null, 1441, false)))
+    assertThatThrownBy(
+            () ->
+                change(
+                    3,
+                    new DispatcherChangeRequest(
+                        null, null, null, DispatcherChangeService.MAX_DURATION + 1, false)))
         .isInstanceOf(ValidationException.class);
   }
 
@@ -428,6 +433,38 @@ class DispatcherChangeServiceTest {
     change(3, drag(null, null, Fixtures.JO));
 
     verify(reservations).move(eq(APPOINTMENT), any());
+  }
+
+  @Test
+  void resizeOfJobResumedOnLaterDayTouchesOnlyThatDaysLedger() {
+    TimeRange held = new TimeRange(NOW.minus(Duration.ofDays(1)), NOW.plus(Duration.ofMinutes(30)));
+    given(AppointmentStatus.IN_PROGRESS, 3, held);
+    Instant segment = NOW.minus(Duration.ofMinutes(15));
+    List<ActiveReservation> rows =
+        List.of(
+            new ActiveReservation(
+                BAY_RESERVATION,
+                new ReservationRow(
+                    Fixtures.HUDSON_BAY_1,
+                    ReservationRow.BAY,
+                    new TimeRange(segment, held.end().plus(BUFFER)))),
+            new ActiveReservation(
+                TECH_RESERVATION,
+                new ReservationRow(
+                    Fixtures.JO, ReservationRow.TECHNICIAN, new TimeRange(segment, held.end()))));
+    when(reservations.activeRows(APPOINTMENT)).thenReturn(rows);
+
+    change(3, new DispatcherChangeRequest(null, null, null, (int) held.minutes() + 30, false));
+
+    LocalDate today = LocalDate.of(2026, 11, 4);
+    verify(ledger)
+        .applyCommitted(
+            eq(Fixtures.HUDSON),
+            eq(today),
+            eq(List.of(BAY_RESERVATION, TECH_RESERVATION)),
+            anyMap());
+    verify(ledger, never())
+        .applyCommitted(eq(Fixtures.HUDSON), eq(today.minusDays(1)), any(), any());
   }
 
   @Test

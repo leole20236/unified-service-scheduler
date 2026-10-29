@@ -24,11 +24,14 @@ public class ScheduleReadRepository {
   }
 
   /**
-   * Live appointments (not cancelled, not no-show) overlapping the day, by start. The lower bound
-   * on {@code start_at} keeps the {@code appointment_dealership_day} index usable (no job is longer
-   * than a day).
+   * Live appointments (not cancelled, not no-show) that may be drawn on the day: those whose period
+   * overlaps it (the lower bound on {@code start_at} keeps {@code appointment_dealership_day}
+   * usable) and those with an active reservation on it (a job resumed days after it started), with
+   * the periods of their active technician and bay reservations.
    */
   public List<ScheduleAppointmentRow> appointments(UUID dealershipId, TimeRange day) {
+    Timestamp from = Timestamp.from(day.start());
+    Timestamp to = Timestamp.from(day.end());
     return jdbc.query(
         """
         SELECT a.id, a.version, a.status, a.hold_reason, a.service_bay_id, a.technician_id,
@@ -37,11 +40,21 @@ public class ScheduleReadRepository {
                 WHERE s.appointment_id = a.id) AS planned_minutes,
                (SELECT array_agg(t.code ORDER BY s.position)
                 FROM appointment_service s JOIN service_type t ON t.id = s.service_type_id
-                WHERE s.appointment_id = a.id) AS codes
+                WHERE s.appointment_id = a.id) AS codes,
+               seg.technician_from, seg.technician_to, seg.bay_from, seg.bay_to
         FROM appointment a
         JOIN vehicle v ON v.id = a.vehicle_id
-        WHERE a.dealership_id = ? AND a.start_at >= ? AND a.start_at < ? AND a.end_at > ?
-          AND a.status NOT IN ('CANCELLED', 'NO_SHOW')
+        LEFT JOIN LATERAL (
+          SELECT max(r.start_at) FILTER (WHERE r.technician_id IS NOT NULL) AS technician_from,
+                 max(r.end_at) FILTER (WHERE r.technician_id IS NOT NULL) AS technician_to,
+                 max(r.start_at) FILTER (WHERE r.service_bay_id IS NOT NULL) AS bay_from,
+                 max(r.end_at) FILTER (WHERE r.service_bay_id IS NOT NULL) AS bay_to
+          FROM resource_reservation r WHERE r.appointment_id = a.id AND r.active) seg ON true
+        WHERE a.dealership_id = ? AND a.status NOT IN ('CANCELLED', 'NO_SHOW')
+          AND ((a.start_at >= ? AND a.start_at < ? AND a.end_at > ?)
+            OR a.id IN (SELECT r.appointment_id FROM resource_reservation r
+                        WHERE r.dealership_id = ? AND r.active AND r.appointment_id IS NOT NULL
+                          AND r.period && tstzrange(?::timestamptz, ?::timestamptz, '[)')))
         ORDER BY a.start_at, a.id
         """,
         (rs, n) ->
@@ -59,11 +72,22 @@ public class ScheduleReadRepository {
                 rs.getString("registration"),
                 rs.getString("make"),
                 rs.getString("model"),
-                codes(rs.getArray("codes"))),
+                codes(rs.getArray("codes")),
+                instant(rs.getTimestamp("technician_from")),
+                instant(rs.getTimestamp("technician_to")),
+                instant(rs.getTimestamp("bay_from")),
+                instant(rs.getTimestamp("bay_to"))),
         dealershipId,
         Timestamp.from(day.start().minusSeconds(24 * 3600)),
-        Timestamp.from(day.end()),
-        Timestamp.from(day.start()));
+        to,
+        from,
+        dealershipId,
+        from,
+        to);
+  }
+
+  private static Instant instant(Timestamp t) {
+    return t == null ? null : t.toInstant();
   }
 
   /** Active blocks overlapping the day, by start. */

@@ -16,7 +16,6 @@ import com.keyloop.scheduler.query.AppointmentReadRepository;
 import com.keyloop.scheduler.query.AppointmentView;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -26,8 +25,6 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionOperations;
@@ -44,9 +41,13 @@ import org.springframework.transaction.support.TransactionOperations;
 public class DispatcherChangeService {
 
   static final int MIN_DURATION = 5;
-  static final int MAX_DURATION = 24 * 60;
 
-  private static final Logger LOG = LoggerFactory.getLogger(DispatcherChangeService.class);
+  /**
+   * Counted from the appointment's start, which a job resumed on a later day keeps (spec 6.2), so
+   * the period may span the hold: up to the 60-day horizon plus a day.
+   */
+  static final int MAX_DURATION = 61 * 24 * 60;
+
   private static final String AGGREGATE = "Appointment";
   private static final String RESCHEDULED_EVENT = "AppointmentRescheduled";
 
@@ -56,10 +57,10 @@ public class DispatcherChangeService {
   private final ResourceLocks locks;
   private final AppointmentReadRepository reads;
   private final OutboxWriter outbox;
-  private final SlotLedger ledger;
   private final DbClock clock;
   private final TransactionOperations transactions;
   private final HoldGuard holds;
+  private final LedgerWrites ledgerWrites;
 
   /** Creates the service; {@code transactions} runs each attempt in a new transaction. */
   public DispatcherChangeService(
@@ -78,10 +79,10 @@ public class DispatcherChangeService {
     this.locks = locks;
     this.reads = reads;
     this.outbox = outbox;
-    this.ledger = ledger;
     this.clock = clock;
     this.transactions = transactions;
     this.holds = new HoldGuard(ledger);
+    this.ledgerWrites = new LedgerWrites(ledger);
   }
 
   /**
@@ -106,10 +107,11 @@ public class DispatcherChangeService {
       Planned p = plan(dealershipId, appointmentId, expectedVersion, req);
       try {
         Moved moved = transactions.execute(status -> persist(p));
-        writeThrough(p, moved);
+        ledgerWrites.apply(p.dealership(), moved.removed(), moved.moved());
         return moved.view();
       } catch (ReservationConflictException e) {
-        markDirty(dealershipId, p.newDate());
+        HoldGuard.dates(p.dealership(), p.bay().period())
+            .forEach(date -> ledgerWrites.markDirty(dealershipId, date));
         throw unavailable(p);
       } catch (RuntimeException e) {
         if (!deadlockRetried && SqlStates.has(e, SqlStates.DEADLOCK_DETECTED)) {
@@ -128,12 +130,11 @@ public class DispatcherChangeService {
       long expectedVersion,
       TimeRange period,
       ReservationRow bay,
-      ReservationRow technician,
-      LocalDate oldDate,
-      LocalDate newDate) {}
+      ReservationRow technician) {}
 
   /** What a committed move produced. */
-  private record Moved(Map<UUID, ReservationRow> moved, AppointmentView view) {}
+  private record Moved(
+      Map<UUID, TimeRange> removed, Map<UUID, ReservationRow> moved, AppointmentView view) {}
 
   private Planned plan(
       UUID dealershipId, UUID appointmentId, long expectedVersion, DispatcherChangeRequest req) {
@@ -201,9 +202,7 @@ public class DispatcherChangeService {
         expectedVersion,
         period,
         new ReservationRow(bayId, ReservationRow.BAY, bayPeriod),
-        new ReservationRow(technicianId, ReservationRow.TECHNICIAN, technicianPeriod),
-        state.period().start().atZone(d.zoneId()).toLocalDate(),
-        localStart.toLocalDate());
+        new ReservationRow(technicianId, ReservationRow.TECHNICIAN, technicianPeriod));
   }
 
   /** Where the running work segment of a resource type started (it may differ after a resume). */
@@ -239,7 +238,12 @@ public class DispatcherChangeService {
           ? ChangeDiagnosis.notFound(id)
           : ChangeDiagnosis.stale(id);
     }
+    // The rows' own periods before the move decide which ledger days they leave.
+    Map<UUID, TimeRange> before = new LinkedHashMap<>();
+    reservations.activeRows(id).forEach(r -> before.put(r.reservationId(), r.row().period()));
     Map<UUID, ReservationRow> moved = reservations.move(id, List.of(p.bay(), p.technician()));
+    Map<UUID, TimeRange> removed = new LinkedHashMap<>();
+    moved.keySet().forEach(r -> removed.put(r, before.getOrDefault(r, state.period())));
     outbox.append(
         AGGREGATE,
         id,
@@ -259,7 +263,7 @@ public class DispatcherChangeService {
             p.technician().resourceId(),
             p.dealership().zoneId().getId(),
             state.status().name()));
-    return new Moved(moved, reads.find(id).orElseThrow());
+    return new Moved(removed, moved, reads.find(id).orElseThrow());
   }
 
   /** The refused move: the appointments holding the target, read after the rollback. */
@@ -275,33 +279,5 @@ public class DispatcherChangeService {
         DispatcherResources.taken(p.dealership(), p.period().start()),
         List.of(),
         DispatcherResources.others(conflicts, p.state().id()));
-  }
-
-  /** After commit: the moved reservations replace their old ledger entries. */
-  private void writeThrough(Planned p, Moved m) {
-    UUID dealershipId = p.state().dealershipId();
-    List<UUID> ids = List.copyOf(m.moved().keySet());
-    try {
-      if (p.oldDate().equals(p.newDate())) {
-        ledger.applyCommitted(dealershipId, p.newDate(), ids, m.moved());
-      } else {
-        ledger.applyCommitted(dealershipId, p.oldDate(), ids, Map.of());
-        ledger.applyCommitted(dealershipId, p.newDate(), List.of(), m.moved());
-      }
-    } catch (RuntimeException e) {
-      LOG.warn("Ledger write-through of moved {} failed: {}", p.state().id(), e.toString());
-      markDirty(dealershipId, p.oldDate());
-      if (!p.oldDate().equals(p.newDate())) {
-        markDirty(dealershipId, p.newDate());
-      }
-    }
-  }
-
-  private void markDirty(UUID dealershipId, LocalDate date) {
-    try {
-      ledger.markDirty(dealershipId, date);
-    } catch (RuntimeException e) {
-      LOG.warn("Could not mark ledger of {} dirty: {}", dealershipId, e.toString());
-    }
   }
 }

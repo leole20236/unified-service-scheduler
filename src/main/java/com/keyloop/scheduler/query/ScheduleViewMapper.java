@@ -3,12 +3,14 @@ package com.keyloop.scheduler.query;
 import com.keyloop.scheduler.catalog.DealershipView;
 import com.keyloop.scheduler.catalog.OpeningHours;
 import com.keyloop.scheduler.catalog.ResourceCatalog;
+import com.keyloop.scheduler.common.time.TimeRange;
 import com.keyloop.scheduler.query.ScheduleView.AppointmentItem;
 import com.keyloop.scheduler.query.ScheduleView.BlockItem;
 import com.keyloop.scheduler.query.ScheduleView.Item;
 import com.keyloop.scheduler.query.ScheduleView.Lane;
 import com.keyloop.scheduler.query.ScheduleView.OpeningWindow;
 import com.keyloop.scheduler.query.ScheduleView.TechnicianLine;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -28,6 +30,7 @@ public final class ScheduleViewMapper {
 
   private static final String ON_HOLD = "ON_HOLD";
   private static final String IN_PROGRESS = "IN_PROGRESS";
+  private static final String COMPLETED = "COMPLETED";
   private static final String BAY = "BAY";
   private static final String TECHNICIAN = "TECHNICIAN";
   private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm");
@@ -62,8 +65,18 @@ public final class ScheduleViewMapper {
                         t.id(), t.displayName(), t.skills().stream().sorted().toList()))
             .sorted(Comparator.comparing(TechnicianLine::displayName))
             .toList();
+    TimeRange day =
+        new TimeRange(
+            date.atStartOfDay(d.zoneId()).toInstant(),
+            date.plusDays(1).atStartOfDay(d.zoneId()).toInstant());
+    Duration buffer = Duration.ofMinutes(d.bayBufferMinutes());
     List<Item> items = new ArrayList<>();
-    appointments.forEach(a -> items.add(appointment(a, groupBy, now)));
+    for (ScheduleAppointmentRow a : appointments) {
+      TimeRange bar = bar(a, buffer);
+      if (bar.overlaps(day)) {
+        items.add(appointment(a, bar, groupBy, now));
+      }
+    }
     blocks.forEach(b -> items.add(block(b, groupBy)));
     return new ScheduleView(
         date,
@@ -77,8 +90,41 @@ public final class ScheduleViewMapper {
         items);
   }
 
+  /**
+   * Where the job is drawn: its current segment. A job in progress (or completed) from its
+   * technician reservation's start to its end; a job on hold over its kept bay (without the
+   * buffer), or up to the hold time when the bay was released; otherwise its planned period.
+   * Segments worked before a hold are not kept (spec 6.2), so they are not drawn.
+   */
+  static TimeRange bar(ScheduleAppointmentRow a, Duration buffer) {
+    TimeRange planned = new TimeRange(a.start(), a.end());
+    switch (a.status()) {
+      case IN_PROGRESS, COMPLETED -> {
+        if (a.technicianFrom() != null && a.technicianFrom().isBefore(a.end())) {
+          return new TimeRange(a.technicianFrom(), a.end());
+        }
+        return planned;
+      }
+      case ON_HOLD -> {
+        boolean bayKept =
+            a.bayTo() != null && (a.technicianTo() == null || a.bayTo().isAfter(a.technicianTo()));
+        if (bayKept) {
+          Instant end = a.bayTo().minus(buffer);
+          return new TimeRange(a.bayFrom(), end.isAfter(a.bayFrom()) ? end : a.bayTo());
+        }
+        if (a.technicianTo() != null) {
+          return new TimeRange(a.technicianFrom(), a.technicianTo());
+        }
+        return planned;
+      }
+      default -> {
+        return planned;
+      }
+    }
+  }
+
   private static AppointmentItem appointment(
-      ScheduleAppointmentRow a, GroupBy groupBy, Instant now) {
+      ScheduleAppointmentRow a, TimeRange bar, GroupBy groupBy, Instant now) {
     boolean onHold = ON_HOLD.equals(a.status());
     UUID technicianId = onHold ? null : a.technicianId();
     UUID laneId = groupBy == GroupBy.BAY ? a.serviceBayId() : technicianId;
@@ -91,8 +137,8 @@ public final class ScheduleViewMapper {
         laneId,
         a.serviceBayId(),
         technicianId,
-        a.start(),
-        a.end(),
+        bar.start(),
+        bar.end(),
         onHold ? Math.max(MIN_REMAINING_MINUTES, a.plannedMinutes() - a.workedMinutes()) : null,
         vehicle(a),
         a.serviceCodes(),

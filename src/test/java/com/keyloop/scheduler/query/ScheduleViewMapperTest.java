@@ -5,10 +5,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.keyloop.scheduler.catalog.BayView;
 import com.keyloop.scheduler.catalog.ResourceCatalog;
 import com.keyloop.scheduler.catalog.TechnicianView;
+import com.keyloop.scheduler.common.time.TimeRange;
 import com.keyloop.scheduler.query.ScheduleView.AppointmentItem;
 import com.keyloop.scheduler.query.ScheduleView.BlockItem;
 import com.keyloop.scheduler.support.CatalogFixtures;
 import com.keyloop.scheduler.support.Fixtures;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
@@ -54,7 +56,116 @@ class ScheduleViewMapperTest {
         "AB12 CDE",
         "Ford",
         "Focus",
-        List.of("OIL_CHANGE", "BRAKE_INSPECTION"));
+        List.of("OIL_CHANGE", "BRAKE_INSPECTION"),
+        null,
+        null,
+        null,
+        null);
+  }
+
+  private static ScheduleAppointmentRow segmented(
+      String status, Instant start, Instant end, Instant[] technician, Instant[] bay) {
+    return new ScheduleAppointmentRow(
+        APPOINTMENT,
+        4,
+        status,
+        "ON_HOLD".equals(status) ? "PARTS" : null,
+        Fixtures.RIVERSIDE_BAY_1,
+        Fixtures.SAM,
+        start,
+        end,
+        120,
+        40,
+        "AB12 CDE",
+        "Ford",
+        "Focus",
+        List.of("OIL_CHANGE"),
+        technician == null ? null : technician[0],
+        technician == null ? null : technician[1],
+        bay == null ? null : bay[0],
+        bay == null ? null : bay[1]);
+  }
+
+  private static Instant at(String time) {
+    return Instant.parse("2026-11-04T" + time + ":00Z");
+  }
+
+  @Test
+  void jobResumedOnLaterDayIsDrawnFromItsCurrentSegment() {
+    Instant tuesdayNine = at("09:00").minus(Duration.ofDays(1));
+    Instant ten = at("10:00");
+    Instant end = at("10:45");
+    ScheduleAppointmentRow resumed =
+        segmented(
+            "IN_PROGRESS", tuesdayNine, end, new Instant[] {ten, end}, new Instant[] {ten, end});
+
+    AppointmentItem today = only(map(GroupBy.BAY, resumed, ten));
+    ScheduleView tuesday =
+        ScheduleViewMapper.toView(
+            catalog(), WEDNESDAY.minusDays(1), GroupBy.BAY, List.of(resumed), List.of(), ten);
+
+    assertThat(today.start()).isEqualTo(ten);
+    assertThat(today.end()).isEqualTo(end);
+    assertThat(tuesday.items()).isEmpty();
+  }
+
+  @Test
+  void heldJobWithReleasedBayEndsAtTheHoldTime() {
+    Instant holdTime = at("09:40");
+    ScheduleAppointmentRow held =
+        segmented(
+            "ON_HOLD",
+            NINE,
+            at("11:00"),
+            new Instant[] {NINE, holdTime},
+            new Instant[] {NINE, holdTime});
+
+    AppointmentItem item = only(map(GroupBy.BAY, held, at("12:00")));
+
+    assertThat(item.start()).isEqualTo(NINE);
+    assertThat(item.end()).isEqualTo(holdTime);
+    assertThat(item.remainingMinutes()).isEqualTo(80);
+  }
+
+  @Test
+  void heldJobKeepingItsBayIsDrawnOverTheBayWithoutBuffer() {
+    Duration buffer = Duration.ofMinutes(10);
+    ScheduleAppointmentRow kept =
+        segmented(
+            "ON_HOLD",
+            NINE,
+            at("11:00"),
+            new Instant[] {NINE, at("09:40")},
+            new Instant[] {NINE, at("11:00").plus(buffer)});
+    ScheduleAppointmentRow tiny =
+        segmented(
+            "ON_HOLD",
+            NINE,
+            at("11:00"),
+            null,
+            new Instant[] {NINE, NINE.plus(Duration.ofMinutes(5))});
+
+    assertThat(ScheduleViewMapper.bar(kept, buffer)).isEqualTo(new TimeRange(NINE, at("11:00")));
+    assertThat(ScheduleViewMapper.bar(tiny, buffer))
+        .isEqualTo(new TimeRange(NINE, NINE.plus(Duration.ofMinutes(5))));
+  }
+
+  @Test
+  void withoutActiveSegmentsTheJobIsDrawnOverItsPlannedPeriod() {
+    TimeRange planned = new TimeRange(NINE, TEN);
+    assertThat(ScheduleViewMapper.bar(segmented("ON_HOLD", NINE, TEN, null, null), Duration.ZERO))
+        .isEqualTo(planned);
+    assertThat(ScheduleViewMapper.bar(segmented("COMPLETED", NINE, TEN, null, null), Duration.ZERO))
+        .isEqualTo(planned);
+    assertThat(
+            ScheduleViewMapper.bar(
+                segmented("IN_PROGRESS", NINE, TEN, new Instant[] {TEN, TEN.plusSeconds(60)}, null),
+                Duration.ZERO))
+        .isEqualTo(planned);
+    assertThat(
+            ScheduleViewMapper.bar(
+                segmented("CHECKED_IN", NINE, TEN, new Instant[] {NINE, TEN}, null), Duration.ZERO))
+        .isEqualTo(planned);
   }
 
   private static AppointmentItem only(ScheduleView view) {
@@ -108,7 +219,11 @@ class ScheduleViewMapperTest {
             null,
             null,
             null,
-            List.of());
+            List.of(),
+            null,
+            null,
+            null,
+            null);
 
     AppointmentItem item = only(map(GroupBy.BAY, worked, NINE));
 
