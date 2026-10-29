@@ -15,6 +15,14 @@ neither can ever be double-booked, even when many requests race for the same slo
 
 **Stack:** Java 21 · Spring Boot 3.5 · PostgreSQL 16 · Redis 7 · Flyway · Testcontainers · Maven
 
+| Start here | |
+|---|---|
+| Video walkthrough (9 min, English subtitles) | https://youtu.be/vMx6EF7OorQ |
+| System design: high level | [`docs/system-design/01-high-level-design.md`](docs/system-design/01-high-level-design.md) |
+| System design: detailed (schema, APIs, concurrency) | [`docs/system-design/02-detailed-design.md`](docs/system-design/02-detailed-design.md) |
+| Diagrams | [`docs/diagrams`](docs/diagrams) |
+| How I worked with AI | [`docs/ai-collaboration/decision-log.md`](docs/ai-collaboration/decision-log.md) |
+
 ---
 
 ## 1. Run it locally
